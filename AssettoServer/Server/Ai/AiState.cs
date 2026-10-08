@@ -1254,7 +1254,7 @@ public class AiState : IDisposable
         else
         {
             direction = fastAdjacent >= 0 ? -LateralLaneVector(fastAdjacent, tangent) : RightVector(tangent) * slow;
-            meters = _configuration.Extra.AiParams.LaneWidthMeters * 0.8f;
+            meters = BT.PullOverShoulderMeters;
         }
         if (direction.LengthSquared() < 1e-4f) return Vector3.Zero;
         return Vector3.Normalize(direction) * (meters * Smooth(_pullOverProgress));

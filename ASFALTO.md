@@ -45,7 +45,7 @@ Every player sees the same crash. Big crashes are simulated by the hitting playe
 | 25–50 km/h | It steers aside with hazards on, onto the shoulder from the slow lane or otherwise to the slow edge of its lane, and rolls to a stop rather than braking hard. It waits 8 s, then rejoins when no player is close behind. |
 | 50 km/h and up | The car is pushed, using momentum with traffic at 3000 kg against the player's car. It tumbles under real physics on the hitting player's game; the server's fallback slide spins it, and above 90 km/h can roll it (35 % chance). Parts come off. It then stays as a wreck. It's cleared once no player is within 250 m, or after 90 s. Hitting a wreck knocks it again. |
 
-**Settings:** `CrashPhysics: true`, `TrafficMassKg: 3000`, `PlayerMassKg: 1400`, `MinorCrashKph: 25`, `HeavyCrashKph: 50`, `RolloverKph: 90`, `RolloverChance: 0.35`, `CrashSlideDeceleration: 6`, `PullOverAfterCrash: true`, `PullOverSeconds: 8`, `PullOverDeceleration: 2.5`, `TapSlowdownSeconds: 3`, `WreckClearMeters: 250`, `WreckMaxSeconds: 90`, `ClientCrashPhysics: true`.
+**Settings:** `CrashPhysics: true`, `TrafficMassKg: 3000`, `PlayerMassKg: 1400`, `MinorCrashKph: 25`, `HeavyCrashKph: 50`, `RolloverKph: 90`, `RolloverChance: 0.35`, `CrashSlideDeceleration: 6`, `PullOverAfterCrash: true`, `PullOverSeconds: 8`, `PullOverDeceleration: 2.5`, `PullOverShoulderMeters: 1.4`, `TapSlowdownSeconds: 3`, `WreckClearMeters: 250`, `WreckMaxSeconds: 90`, `ClientCrashPhysics: true`.
 
 ### Client effects
 
