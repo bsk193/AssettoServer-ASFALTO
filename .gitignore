@@ -367,3 +367,5 @@ out-win-*
 
 # Jetbrains IDEs
 .idea/
+
+*.tar.gz
