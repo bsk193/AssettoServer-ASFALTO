@@ -123,6 +123,9 @@ public partial class AiParams : ObservableObject
     [YamlMember(Description = "Override some settings for specific car models")]
     public List<CarSpecificOverrides> CarSpecificOverrides { get; init; } = [];
 
+    [YamlMember(Description = "ASFALTO Traffic 2.0: lane changes, yielding to flashing players, lane sway, driver personalities (off by default)")]
+    public Traffic2Params Traffic2 { get; init; } = new();
+
     [YamlIgnore] public float PlayerRadiusSquared => PlayerRadiusMeters * PlayerRadiusMeters;
     [YamlIgnore] public float PlayerAfkTimeoutMilliseconds => PlayerAfkTimeoutSeconds * 1000;
     [YamlIgnore] public float MaxPlayerDistanceToAiSplineSquared => MaxPlayerDistanceToAiSplineMeters * MaxPlayerDistanceToAiSplineMeters;

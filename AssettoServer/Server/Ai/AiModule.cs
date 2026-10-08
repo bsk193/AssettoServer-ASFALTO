@@ -24,6 +24,8 @@ public class AiModule : Module
             builder.RegisterType<AiBehavior>().AsSelf().As<IHostedService>().SingleInstance();
             builder.RegisterType<AiUpdater>().AsSelf().SingleInstance().AutoActivate();
             builder.RegisterType<AiSlotFilter>().As<IOpenSlotFilter>();
+            // ASFALTO Traffic 2.0: always registered (plugins may use it), inactive unless AiParams.Traffic2.Enabled
+            builder.RegisterType<Traffic2FlashDetector>().AsSelf().SingleInstance().AutoActivate();
             
             if (_configuration.Extra.AiParams.HourlyTrafficDensity != null)
             {

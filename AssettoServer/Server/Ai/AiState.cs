@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Numerics;
@@ -64,6 +64,23 @@ public class AiState : IDisposable
     private float _endIndicatorDistance;
     private float _minObstacleDistance;
     private double _randomTwilight;
+
+    // ── ASFALTO Traffic 2.0 (AiParams.Traffic2) ──
+    private int _lcDirection;          // 0 = none, -1 = towards LeftId, +1 = towards RightId
+    private float _lcProgress;         // 0..1
+    private float _lcSeconds;          // this driver's lane change duration
+    private long _lcCooldownUntil;
+    private int _lcRequest;            // set by obstacle detection / yield, started in Update
+    private long _yieldUntil;
+    private long _brakeCheckUntil;
+    private bool _stubborn;
+    private float _swayPhase;
+    private float _swayFrequency;
+    private float _swayAmplitude;
+    private CarStatusFlags _laneChangeIndicator;
+
+    /// <summary>A lane change is in progress (direction -1 left, +1 right).</summary>
+    public int LaneChangeDirection => _lcDirection;
 
     private readonly ACServerConfiguration _configuration;
     private readonly SessionManager _sessionManager;
@@ -185,6 +202,7 @@ public class AiState : IDisposable
         _endIndicatorDistance = 0;
         _lastTick = _sessionManager.ServerTimeMilliseconds;
         _minObstacleDistance = Random.Shared.Next(8, 13);
+        ResetTraffic2();
         SpawnCounter++;
         Initialized = true;
         Update();
@@ -462,6 +480,12 @@ public class AiState : IDisposable
             SetTargetSpeed(0);
             return;
         }
+
+        if (_sessionManager.ServerTimeMilliseconds < _brakeCheckUntil)
+        {
+            SetTargetSpeed(MathF.Max(WalkingSpeed, InitialMaxSpeed - T2.BrakeCheckDropKph / 3.6f), EntryCar.AiDeceleration * 1.3f, EntryCar.AiAcceleration);
+            return;
+        }
             
         float targetSpeed = InitialMaxSpeed;
         float maxSpeed = InitialMaxSpeed;
@@ -471,6 +495,7 @@ public class AiState : IDisposable
         var playerObstacle = FindClosestPlayerObstacle();
 
         ClosestAiObstacleDistance = splineLookahead.ClosestAiState != null ? splineLookahead.ClosestAiStateDistance : -1;
+        DecideLaneChange(splineLookahead.ClosestAiState, splineLookahead.ClosestAiStateDistance, playerObstacle);
 
         if (playerObstacle.distance < _minObstacleDistance || splineLookahead.ClosestAiStateDistance < _minObstacleDistance)
         {
@@ -533,6 +558,234 @@ public class AiState : IDisposable
         
         MaxSpeed = maxSpeed;
         SetTargetSpeed(targetSpeed, deceleration, EntryCar.AiAcceleration);
+    }
+
+    private Traffic2Params T2 => _configuration.Extra.AiParams.Traffic2;
+    private int SlowSideDirection => T2.SlowLaneSide == TrafficSide.Right ? 1 : -1;
+
+    /// <summary>New driver: personality for lane changes, yielding and sway.</summary>
+    private void ResetTraffic2()
+    {
+        _lcDirection = 0;
+        _lcProgress = 0;
+        _lcRequest = 0;
+        _lcCooldownUntil = _sessionManager.ServerTimeMilliseconds + 3000;
+        _yieldUntil = 0;
+        _brakeCheckUntil = 0;
+        _laneChangeIndicator = 0;
+        var t2 = T2;
+        _lcSeconds = Random.Shared.NextSingle(t2.LaneChangeSecondsMin, MathF.Max(t2.LaneChangeSecondsMin, t2.LaneChangeSecondsMax));
+        _stubborn = Random.Shared.NextSingle() < t2.StubbornShare;
+        _swayPhase = Random.Shared.NextSingle() * MathF.PI * 2;
+        _swayFrequency = Random.Shared.NextSingle(0.05f, 0.15f);
+        _swayAmplitude = t2.SwayMeters * Random.Shared.NextSingle(0.3f, 1f);
+    }
+
+    private int AdjacentPoint(int pointId, int direction)
+    {
+        if (pointId < 0) return -1;
+        ref readonly var point = ref _spline.Points[pointId];
+        return direction < 0 ? point.LeftId : point.RightId;
+    }
+
+    /// <summary>
+    /// Is the lane next to us (direction -1 left, +1 right) free from <paramref name="behind"/> m behind to
+    /// <paramref name="ahead"/> m ahead? Checks other AI on that lane's spline and players near it (blind spot).
+    /// </summary>
+    private bool IsLaneFree(int direction, float behind, float ahead)
+    {
+        var points = _spline.Points;
+        var adjacent = AdjacentPoint(CurrentSplinePointId, direction);
+        if (adjacent < 0) return false;
+
+        // AI on the target lane, walking its spline both ways
+        float distance = 0;
+        for (var id = adjacent; id >= 0 && distance < ahead; id = points[id].NextId)
+        {
+            var other = _spline.SlowestAiStates[id];
+            if (other != null && other != this) return false;
+            distance += points[id].Length;
+        }
+        distance = 0;
+        for (var id = points[adjacent].PreviousId; id >= 0 && distance < behind; id = points[id].PreviousId)
+        {
+            var other = _spline.SlowestAiStates[id];
+            if (other != null && other != this) return false;
+            distance += points[id].Length;
+        }
+
+        // players: anyone beside or close behind / ahead in the target lane
+        var laneVector = points[adjacent].Position - points[CurrentSplinePointId].Position;
+        var laneWidth = laneVector.Length();
+        if (laneWidth < 0.5f) return false;
+        var side = laneVector / laneWidth;
+        var forward = Status.Velocity.LengthSquared() > 0.25f ? Vector3.Normalize(Status.Velocity) : side;
+        for (var i = 0; i < _entryCarManager.EntryCars.Length; i++)
+        {
+            var car = _entryCarManager.EntryCars[i];
+            if (car.Client?.HasSentFirstUpdate != true) continue;
+            var rel = car.Status.Position - Status.Position;
+            if (MathF.Abs(rel.Y) > 3) continue;
+            var lon = Vector3.Dot(rel, forward);
+            var lat = Vector3.Dot(rel, side);
+            if (lon > -behind && lon < ahead && lat > laneWidth * 0.35f && lat < laneWidth * 1.65f) return false;
+        }
+        return true;
+    }
+
+    /// <summary>A player behind asked to pass (high-beam flash). Returns false if this driver ignores it.</summary>
+    public bool RequestYield()
+    {
+        if (!Initialized || !T2.Enabled || !T2.YieldOnFlash || _stubborn) return false;
+        _yieldUntil = _sessionManager.ServerTimeMilliseconds + 5000;
+        Log.Debug("Traffic2: AI {SessionId} asked to yield", EntryCar.SessionId);
+        return true;
+    }
+
+    /// <summary>Brake check: a short, sharp slowdown (not a stop) for AiParams.Traffic2.BrakeCheckSeconds.</summary>
+    public void BrakeCheck()
+    {
+        if (!Initialized || !T2.Enabled) return;
+        _brakeCheckUntil = _sessionManager.ServerTimeMilliseconds + (long)(T2.BrakeCheckSeconds * 1000);
+    }
+
+    /// <summary>Lane change decisions, called from obstacle detection (every 100 ms).</summary>
+    private void DecideLaneChange(AiState? closestAi, float closestAiDistance, (EntryCar? entryCar, float distance) playerObstacle)
+    {
+        var t2 = T2;
+        var now = _sessionManager.ServerTimeMilliseconds;
+        if (!t2.Enabled || !t2.LaneChanges || _lcDirection != 0 || _lcRequest != 0 || now < _lcCooldownUntil) return;
+        if (now < _stoppedForCollisionUntil || CurrentSpeed < 30 / 3.6f) return;
+
+        var slow = SlowSideDirection;
+        var fast = -slow;
+
+        // 1. yield to a player who flashed: move to the slow side
+        if (now < _yieldUntil)
+        {
+            if (AdjacentPoint(CurrentSplinePointId, slow) < 0)
+            {
+                // already in the slow lane: the player can pass on the other side
+                Log.Debug("Traffic2: AI {SessionId} already in the slow lane, nothing to yield", EntryCar.SessionId);
+                _yieldUntil = 0;
+            }
+            else if (IsLaneFree(slow, t2.LaneFreeBehindMeters, t2.LaneFreeAheadMeters))
+            {
+                _lcRequest = slow;
+                _yieldUntil = 0;
+            }
+            return; // slow lane busy: keep trying until the request expires
+        }
+
+        // 2. overtake a slower car (AI or player) ahead
+        var deltaMs = t2.OvertakeSpeedDeltaKph / 3.6f;
+        var slowAhead = closestAi != null && closestAiDistance < t2.OvertakeLookaheadMeters
+                        && Math.Min(closestAi.CurrentSpeed, closestAi.TargetSpeed) < InitialMaxSpeed - deltaMs;
+        var playerAhead = playerObstacle.entryCar != null && playerObstacle.distance < t2.OvertakeLookaheadMeters
+                          && playerObstacle.entryCar.Status.Velocity.Length() < InitialMaxSpeed - deltaMs;
+        if (slowAhead || playerAhead)
+        {
+            if (IsLaneFree(fast, t2.LaneFreeBehindMeters, t2.LaneFreeAheadMeters)) _lcRequest = fast;
+            else if (IsLaneFree(slow, t2.LaneFreeBehindMeters, t2.LaneFreeAheadMeters)) _lcRequest = slow; // undertake as a last resort
+            return;
+        }
+
+        // 3. keep to the slow lane when it's free for a good while ahead
+        if (AdjacentPoint(CurrentSplinePointId, slow) >= 0
+            && Random.Shared.NextSingle() < t2.ReturnToSlowLaneChance * 0.1f
+            && IsLaneFree(slow, t2.LaneFreeBehindMeters, t2.LaneFreeAheadMeters * 3))
+        {
+            _lcRequest = slow;
+        }
+    }
+
+    /// <summary>Sideways vector from this lane to the neighbouring lane at the current point (no along-road component).</summary>
+    private Vector3 LateralLaneVector(int adjacent, Vector3 tangent)
+    {
+        var laneVector = _spline.Points[adjacent].Position - _spline.Points[CurrentSplinePointId].Position;
+        var flatTangent = tangent with { Y = 0 };
+        if (flatTangent.LengthSquared() < 1e-6f) return laneVector;
+        flatTangent = Vector3.Normalize(flatTangent);
+        return laneVector - flatTangent * Vector3.Dot(laneVector, flatTangent);
+    }
+
+    /// <summary>Starts / advances a lane change and returns the lateral offset to add to the lane position.</summary>
+    private Vector3 AdvanceLaneChange(float dtSeconds, Vector3 lanePosition, Vector3 tangent, out Vector3 lateralVelocity)
+    {
+        lateralVelocity = Vector3.Zero;
+        if (!T2.Enabled) return Vector3.Zero;
+
+        if (_lcDirection == 0 && _lcRequest != 0)
+        {
+            _lcDirection = _lcRequest;
+            _lcRequest = 0;
+            _lcProgress = 0;
+            _laneChangeIndicator = _lcDirection < 0 ? CarStatusFlags.IndicateLeft : CarStatusFlags.IndicateRight;
+            Log.Debug("Traffic2: AI {SessionId} lane change {Direction} at {Speed:F0} km/h", EntryCar.SessionId, _lcDirection < 0 ? "left" : "right", CurrentSpeed * 3.6f);
+        }
+        if (_lcDirection == 0) return Vector3.Zero;
+
+        var adjacent = AdjacentPoint(CurrentSplinePointId, _lcDirection);
+        if (adjacent < 0)
+        {
+            // target lane ended (lane drop): abort and drift back
+            _lcProgress -= dtSeconds / _lcSeconds * 2;
+            if (_lcProgress <= 0) EndLaneChange();
+            return Vector3.Zero;
+        }
+
+        var before = Smooth(_lcProgress);
+        _lcProgress = MathF.Min(1, _lcProgress + dtSeconds / _lcSeconds);
+        var after = Smooth(_lcProgress);
+        var laneVector = LateralLaneVector(adjacent, tangent);
+        if (dtSeconds > 0) lateralVelocity = laneVector * ((after - before) / dtSeconds);
+
+        if (_lcProgress >= 1)
+        {
+            // the car is now on the other lane: continue on its spline from the closest place
+            SwitchToLane(adjacent, lanePosition + laneVector);
+            EndLaneChange();
+            return laneVector; // this frame still uses the old lane's position + the full offset
+        }
+        return laneVector * after;
+    }
+
+    private static float Smooth(float t) => t * t * (3 - 2 * t);
+
+    private void EndLaneChange()
+    {
+        _lcDirection = 0;
+        _lcProgress = 0;
+        _laneChangeIndicator = 0;
+        _lcCooldownUntil = _sessionManager.ServerTimeMilliseconds + (long)(T2.LaneChangeCooldownSeconds * 1000);
+    }
+
+    /// <summary>
+    /// Continues on the neighbouring lane's spline at the place closest to <paramref name="position"/>, keeping speed,
+    /// colour and everything else.
+    /// </summary>
+    private void SwitchToLane(int pointId, Vector3 position)
+    {
+        var points = _spline.Points;
+        // neighbouring points can be offset along the road: step to the segment that contains the car
+        for (var i = 0; i < 8; i++)
+        {
+            var prev = points[pointId].PreviousId;
+            var next = points[pointId].NextId;
+            if (prev >= 0 && Vector3.Dot(position - points[pointId].Position, points[pointId].Position - points[prev].Position) < 0) pointId = prev;
+            else if (next >= 0 && points[next].NextId >= 0 && Vector3.Dot(position - points[next].Position, points[next].Position - points[pointId].Position) > 0) pointId = next;
+            else break;
+        }
+
+        _junctionEvaluator.Clear();
+        CurrentSplinePointId = pointId;
+        if (!_junctionEvaluator.TryNext(CurrentSplinePointId, out var nextPointId)) return;
+        var segment = points[nextPointId].Position - points[CurrentSplinePointId].Position;
+        _currentVecLength = segment.Length();
+        _currentVecProgress = _currentVecLength > 0
+            ? Math.Clamp(Vector3.Dot(position - points[CurrentSplinePointId].Position, segment / _currentVecLength), 0, _currentVecLength * 0.999f)
+            : 0;
+        CalculateTangents();
     }
 
     public void StopForCollision()
@@ -615,6 +868,20 @@ public class AiState : IDisposable
             _endTangent, 
             _currentVecProgress / _currentVecLength);
             
+        if (_configuration.Extra.AiParams.Traffic2.Enabled)
+        {
+            var lateral = AdvanceLaneChange(dt / 1000.0f, smoothPos.Position, smoothPos.Tangent, out var lateralVelocity);
+            if (_swayAmplitude > 0)
+            {
+                var right = Vector3.Cross(smoothPos.Tangent, Vector3.UnitY);
+                if (right.LengthSquared() > 0.0001f)
+                    lateral += Vector3.Normalize(right) * (MathF.Sin(currentTime / 1000.0f * _swayFrequency * MathF.PI * 2 + _swayPhase) * _swayAmplitude);
+            }
+            smoothPos.Position += lateral;
+            if (CurrentSpeed > 1 && lateralVelocity != Vector3.Zero)
+                smoothPos.Tangent = Vector3.Normalize(smoothPos.Tangent * CurrentSpeed + lateralVelocity);
+        }
+
         Vector3 rotation = new Vector3
         {
             X = MathF.Atan2(smoothPos.Tangent.Z, smoothPos.Tangent.X) - MathF.PI / 2,
@@ -641,7 +908,7 @@ public class AiState : IDisposable
                             | (CurrentSpeed == 0 || Acceleration < 0 ? CarStatusFlags.BrakeLightsOn : 0)
                             | (_stoppedForObstacle && _sessionManager.ServerTimeMilliseconds > _obstacleHonkStart && _sessionManager.ServerTimeMilliseconds < _obstacleHonkEnd ? CarStatusFlags.Horn : 0)
                             | GetWiperSpeed(_weatherManager.CurrentWeather.RainIntensity)
-                            | _indicator;
+                            | (_laneChangeIndicator != 0 ? _laneChangeIndicator : _indicator);
         Status.Gear = 2;
     }
         
