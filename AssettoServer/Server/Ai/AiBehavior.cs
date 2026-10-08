@@ -64,8 +64,12 @@ public class AiBehavior : BackgroundService
         _sessionManager.SessionChanged += OnSessionChanged;
     }
 
-    private static void OnCollision(ACTcpClient sender, CollisionEventArgs args)
+    private void OnCollision(ACTcpClient sender, CollisionEventArgs args)
     {
+        // ASFALTO BetterTraffic handles crashes itself (BetterTrafficCrashes)
+        var bt = _configuration.Extra.AiParams.BetterTraffic;
+        if (bt.Enabled && bt.CrashPhysics) return;
+
         if (args.TargetCar?.AiControlled == true)
         {
             var targetAiState = args.TargetCar.GetClosestAiState(sender.EntryCar.Status.Position);

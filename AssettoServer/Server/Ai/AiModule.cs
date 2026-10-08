@@ -1,5 +1,6 @@
-﻿using AssettoServer.Server.Ai.Splines;
+using AssettoServer.Server.Ai.Splines;
 using AssettoServer.Server.Configuration;
+using AssettoServer.Server.Configuration.Extra;
 using AssettoServer.Server.OpenSlotFilters;
 using Autofac;
 using Microsoft.Extensions.Hosting;
@@ -24,8 +25,16 @@ public class AiModule : Module
             builder.RegisterType<AiBehavior>().AsSelf().As<IHostedService>().SingleInstance();
             builder.RegisterType<AiUpdater>().AsSelf().SingleInstance().AutoActivate();
             builder.RegisterType<AiSlotFilter>().As<IOpenSlotFilter>();
-            // ASFALTO Traffic 2.0: always registered (plugins may use it), inactive unless AiParams.Traffic2.Enabled
-            builder.RegisterType<Traffic2FlashDetector>().AsSelf().SingleInstance().AutoActivate();
+            // ASFALTO BetterTraffic: always registered (plugins may use it), inactive unless AiParams.BetterTraffic.Enabled
+            builder.RegisterType<BetterTrafficFlashDetector>().AsSelf().SingleInstance().AutoActivate();
+            builder.RegisterType<BetterTrafficCrashes>().AsSelf().SingleInstance().AutoActivate();
+
+            var bt = _configuration.Extra.AiParams.BetterTraffic;
+            if (bt.Enabled && bt.DensityPreset != TrafficDensityPreset.None)
+            {
+                // density preset: fills the hourly density, which AssettoServer blends between hours
+                _configuration.Extra.AiParams.HourlyTrafficDensity = TrafficDensityPresets.Hourly(bt.DensityPreset);
+            }
             
             if (_configuration.Extra.AiParams.HourlyTrafficDensity != null)
             {

@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using CommunityToolkit.Mvvm.ComponentModel;
 using JetBrains.Annotations;
 using YamlDotNet.Serialization;
@@ -123,8 +123,8 @@ public partial class AiParams : ObservableObject
     [YamlMember(Description = "Override some settings for specific car models")]
     public List<CarSpecificOverrides> CarSpecificOverrides { get; init; } = [];
 
-    [YamlMember(Description = "ASFALTO Traffic 2.0: lane changes, yielding to flashing players, lane sway, driver personalities (off by default)")]
-    public Traffic2Params Traffic2 { get; init; } = new();
+    [YamlMember(Description = "ASFALTO BetterTraffic: lane changes, yielding to flashing players, lane sway, driver personalities (off by default)")]
+    public BetterTrafficParams BetterTraffic { get; init; } = new();
 
     [YamlIgnore] public float PlayerRadiusSquared => PlayerRadiusMeters * PlayerRadiusMeters;
     [YamlIgnore] public float PlayerAfkTimeoutMilliseconds => PlayerAfkTimeoutSeconds * 1000;

@@ -7,10 +7,10 @@ using AssettoServer.Shared.Network.Packets.Outgoing;
 namespace AssettoServer.Server.Ai;
 
 /// <summary>
-/// ASFALTO Traffic 2.0: a player flashing the high beams (on, then off within FlashWindowMilliseconds) asks the
+/// ASFALTO BetterTraffic: a player flashing the high beams (on, then off within FlashWindowMilliseconds) asks the
 /// nearest traffic car ahead in the same lane to move over (<see cref="AiState.RequestYield"/>).
 /// </summary>
-public class Traffic2FlashDetector
+public class BetterTrafficFlashDetector
 {
     private readonly ACServerConfiguration _configuration;
     private readonly EntryCarManager _entryCarManager;
@@ -18,7 +18,7 @@ public class Traffic2FlashDetector
     private readonly Dictionary<byte, (bool HighBeams, long OnSince)> _state = new();
     private readonly List<AiState> _states = [];
 
-    public Traffic2FlashDetector(ACServerConfiguration configuration, EntryCarManager entryCarManager, SessionManager sessionManager, ACServer server)
+    public BetterTrafficFlashDetector(ACServerConfiguration configuration, EntryCarManager entryCarManager, SessionManager sessionManager, ACServer server)
     {
         _configuration = configuration;
         _entryCarManager = entryCarManager;
@@ -31,8 +31,8 @@ public class Traffic2FlashDetector
 
     private void OnUpdate(object? sender, EventArgs args)
     {
-        var t2 = _configuration.Extra.AiParams.Traffic2;
-        if (!t2.Enabled || !t2.YieldOnFlash) return;
+        var bt = _configuration.Extra.AiParams.BetterTraffic;
+        if (!bt.Enabled || !bt.YieldOnFlash) return;
         var now = _sessionManager.ServerTimeMilliseconds;
 
         foreach (var car in _entryCarManager.EntryCars)
@@ -48,7 +48,7 @@ public class Traffic2FlashDetector
             else if (!highBeams && previous.HighBeams)
             {
                 _state[car.SessionId] = (false, 0);
-                if (now - previous.OnSince <= t2.FlashWindowMilliseconds) OnFlash(car, t2.YieldRangeMeters);
+                if (now - previous.OnSince <= bt.FlashWindowMilliseconds) OnFlash(car, bt.YieldRangeMeters);
             }
         }
     }
@@ -81,7 +81,7 @@ public class Traffic2FlashDetector
         }
 
         var accepted = target != null && target.RequestYield();
-        Serilog.Log.Debug("Traffic2: flash by {Player}: {Result}", player.Client?.Name, target == null ? "no car ahead in lane" : accepted ? "yield requested" : "driver ignores it");
+        Serilog.Log.Debug("BetterTraffic: flash by {Player}: {Result}", player.Client?.Name, target == null ? "no car ahead in lane" : accepted ? "yield requested" : "driver ignores it");
         if (accepted) Yielded?.Invoke(player, target!);
     }
 }

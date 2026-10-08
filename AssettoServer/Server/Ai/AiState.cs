@@ -65,7 +65,7 @@ public class AiState : IDisposable
     private float _minObstacleDistance;
     private double _randomTwilight;
 
-    // ── ASFALTO Traffic 2.0 (AiParams.Traffic2) ──
+    // ── ASFALTO BetterTraffic (AiParams.BetterTraffic) ──
     private int _lcDirection;          // 0 = none, -1 = towards LeftId, +1 = towards RightId
     private float _lcProgress;         // 0..1
     private float _lcSeconds;          // this driver's lane change duration
@@ -78,6 +78,35 @@ public class AiState : IDisposable
     private float _swayFrequency;
     private float _swayAmplitude;
     private CarStatusFlags _laneChangeIndicator;
+    private TrafficPersonality _personality = new();
+    private float _gapSeconds = 1.3f;
+    private object? _leadRef;
+    private float _perceivedLeadSpeed = -1;
+    private long _lastObstacleTick;
+    private float _tailgateSeconds;
+    private long _brakeCheckCooldownUntil;
+    // crashes
+    private AiCrashMode _crashMode;
+    private Vector3 _crashPosition;
+    private Vector3 _crashVelocity;
+    private float _crashYaw;
+    private float _crashYawRate;
+    private float _crashPitch;
+    private float _crashRoll;
+    private float _crashRollTarget;
+    private float _crashImpactKph;
+    private long _crashSince;
+    private long _pullOverUntil;
+    private float _pullOverProgress;
+    private bool _pullOverRejoining;
+    private static int _rightSign; // sign that turns Cross(tangent, Y) into "towards the right-hand lane", 0 = not known yet
+
+    /// <summary>Driver personality name (BetterTraffic), e.g. Calm, Normal, Aggressive, Distracted.</summary>
+    public string PersonalityName => _personality.Name;
+    /// <summary>What a crash did to this car (BetterTraffic).</summary>
+    public AiCrashMode CrashMode => _crashMode;
+    /// <summary>BetterTraffic crash notifications: (car, phase, impact speed in km/h). Raised on the server update loop.</summary>
+    public static event Action<AiState, AiCrashPhase, float>? BetterTrafficCrash;
 
     /// <summary>A lane change is in progress (direction -1 left, +1 right).</summary>
     public int LaneChangeDirection => _lcDirection;
@@ -202,7 +231,7 @@ public class AiState : IDisposable
         _endIndicatorDistance = 0;
         _lastTick = _sessionManager.ServerTimeMilliseconds;
         _minObstacleDistance = Random.Shared.Next(8, 13);
-        ResetTraffic2();
+        ResetBetterTraffic();
         SpawnCounter++;
         Initialized = true;
         Update();
@@ -468,7 +497,26 @@ public class AiState : IDisposable
     public void DetectObstacles()
     {
         if (!Initialized) return;
-            
+
+        if (_crashMode is AiCrashMode.Sliding or AiCrashMode.Wrecked)
+        {
+            SetTargetSpeed(0);
+            return;
+        }
+
+        if (_crashMode == AiCrashMode.PullOver && !_pullOverRejoining)
+        {
+            SetTargetSpeed(0, EntryCar.AiDeceleration * 0.7f, EntryCar.AiAcceleration);
+            if (_sessionManager.ServerTimeMilliseconds > _pullOverUntil && CurrentSpeed == 0 && IsOwnLaneClearBehind(30))
+            {
+                _pullOverRejoining = true;
+                Log.Debug("BetterTraffic: AI {SessionId} rejoins after pulling over", EntryCar.SessionId);
+            }
+            return;
+        }
+
+        if (BT.Enabled) UpdateTailgating();
+
         if (_sessionManager.ServerTimeMilliseconds < _ignoreObstaclesUntil)
         {
             SetTargetSpeed(MaxSpeed);
@@ -483,7 +531,7 @@ public class AiState : IDisposable
 
         if (_sessionManager.ServerTimeMilliseconds < _brakeCheckUntil)
         {
-            SetTargetSpeed(MathF.Max(WalkingSpeed, InitialMaxSpeed - T2.BrakeCheckDropKph / 3.6f), EntryCar.AiDeceleration * 1.3f, EntryCar.AiAcceleration);
+            SetTargetSpeed(MathF.Max(WalkingSpeed, InitialMaxSpeed - BT.BrakeCheckDropKph / 3.6f), EntryCar.AiDeceleration * 1.3f, EntryCar.AiAcceleration);
             return;
         }
             
@@ -529,6 +577,16 @@ public class AiState : IDisposable
             }
         }
 
+        if (BT.Enabled && BT.FollowingGaps)
+        {
+            var follow = FollowingSpeed(splineLookahead.ClosestAiState, splineLookahead.ClosestAiStateDistance, playerObstacle);
+            if (follow < targetSpeed)
+            {
+                targetSpeed = follow;
+                hasObstacle = true;
+            }
+        }
+
         targetSpeed = Math.Min(splineLookahead.MaxSpeed, targetSpeed);
 
         if (CurrentSpeed == 0 && !_stoppedForObstacle)
@@ -560,11 +618,11 @@ public class AiState : IDisposable
         SetTargetSpeed(targetSpeed, deceleration, EntryCar.AiAcceleration);
     }
 
-    private Traffic2Params T2 => _configuration.Extra.AiParams.Traffic2;
-    private int SlowSideDirection => T2.SlowLaneSide == TrafficSide.Right ? 1 : -1;
+    private BetterTrafficParams BT => _configuration.Extra.AiParams.BetterTraffic;
+    private int SlowSideDirection => BT.SlowLaneSide == TrafficSide.Right ? 1 : -1;
 
     /// <summary>New driver: personality for lane changes, yielding and sway.</summary>
-    private void ResetTraffic2()
+    private void ResetBetterTraffic()
     {
         _lcDirection = 0;
         _lcProgress = 0;
@@ -573,12 +631,45 @@ public class AiState : IDisposable
         _yieldUntil = 0;
         _brakeCheckUntil = 0;
         _laneChangeIndicator = 0;
-        var t2 = T2;
-        _lcSeconds = Random.Shared.NextSingle(t2.LaneChangeSecondsMin, MathF.Max(t2.LaneChangeSecondsMin, t2.LaneChangeSecondsMax));
-        _stubborn = Random.Shared.NextSingle() < t2.StubbornShare;
+        _crashMode = AiCrashMode.None;
+        _crashRoll = 0;
+        _crashRollTarget = 0;
+        _pullOverProgress = 0;
+        _pullOverRejoining = false;
+        _tailgateSeconds = 0;
+        _brakeCheckCooldownUntil = 0;
+        _perceivedLeadSpeed = -1;
+        _leadRef = null;
+        _lastObstacleTick = 0;
+        var bt = BT;
+        _personality = PickPersonality(bt.Personalities);
+        _gapSeconds = Random.Shared.NextSingle(_personality.GapSecondsMin, MathF.Max(_personality.GapSecondsMin, _personality.GapSecondsMax));
+        _lcSeconds = Random.Shared.NextSingle(bt.LaneChangeSecondsMin, MathF.Max(bt.LaneChangeSecondsMin, bt.LaneChangeSecondsMax)) * _personality.LaneChangeTimeFactor;
+        _stubborn = Random.Shared.NextSingle() < _personality.StubbornChance + bt.StubbornShare;
         _swayPhase = Random.Shared.NextSingle() * MathF.PI * 2;
         _swayFrequency = Random.Shared.NextSingle(0.05f, 0.15f);
-        _swayAmplitude = t2.SwayMeters * Random.Shared.NextSingle(0.3f, 1f);
+        _swayAmplitude = bt.SwayMeters * Random.Shared.NextSingle(0.3f, 1f) * _personality.SwayFactor;
+        if (bt.Enabled && _personality.SpeedFactor > 0)
+        {
+            InitialMaxSpeed *= _personality.SpeedFactor;
+            CurrentSpeed = InitialMaxSpeed;
+            TargetSpeed = InitialMaxSpeed;
+            MaxSpeed = InitialMaxSpeed;
+        }
+    }
+
+    private static TrafficPersonality PickPersonality(List<TrafficPersonality> personalities)
+    {
+        float total = 0;
+        foreach (var p in personalities) total += MathF.Max(0, p.Weight);
+        if (total <= 0) return personalities.Count > 0 ? personalities[0] : new TrafficPersonality();
+        var roll = Random.Shared.NextSingle() * total;
+        foreach (var p in personalities)
+        {
+            roll -= MathF.Max(0, p.Weight);
+            if (roll <= 0) return p;
+        }
+        return personalities[^1];
     }
 
     private int AdjacentPoint(int pointId, int direction)
@@ -633,29 +724,373 @@ public class AiState : IDisposable
         return true;
     }
 
-    /// <summary>A player behind asked to pass (high-beam flash). Returns false if this driver ignores it.</summary>
-    public bool RequestYield()
+    /// <summary>
+    /// Speed that keeps this driver's time gap to the car ahead (AI or player). The driver sees speed changes of the car
+    /// ahead only after its reaction time. Returns float.MaxValue when nothing needs following.
+    /// </summary>
+    private float FollowingSpeed(AiState? closestAi, float closestAiDistance, (EntryCar? entryCar, float distance) playerObstacle)
     {
-        if (!Initialized || !T2.Enabled || !T2.YieldOnFlash || _stubborn) return false;
-        _yieldUntil = _sessionManager.ServerTimeMilliseconds + 5000;
-        Log.Debug("Traffic2: AI {SessionId} asked to yield", EntryCar.SessionId);
+        object? lead = null;
+        float leadDistance = float.MaxValue, leadSpeed = 0;
+        if (closestAi != null)
+        {
+            lead = closestAi;
+            leadDistance = closestAiDistance;
+            leadSpeed = closestAi.CurrentSpeed;
+        }
+        if (playerObstacle.entryCar != null)
+        {
+            var playerDistance = MathF.Max(0, playerObstacle.distance - EntryCar.VehicleLengthPreMeters - 2.3f);
+            if (playerDistance < leadDistance)
+            {
+                lead = playerObstacle.entryCar;
+                leadDistance = playerDistance;
+                leadSpeed = playerObstacle.entryCar.Status.Velocity.Length();
+            }
+        }
+        if (lead == null || leadDistance > 250)
+        {
+            _leadRef = null;
+            _perceivedLeadSpeed = -1;
+            return float.MaxValue;
+        }
+
+        if (!ReferenceEquals(lead, _leadRef) || _perceivedLeadSpeed < 0) _perceivedLeadSpeed = leadSpeed;
+        else _perceivedLeadSpeed += (leadSpeed - _perceivedLeadSpeed) * MathF.Min(1, 0.1f / MathF.Max(0.05f, _personality.ReactionSeconds));
+        _leadRef = lead;
+
+        var gap = MathF.Max(BT.MinFollowingGapMeters, _gapSeconds * CurrentSpeed);
+        var closing = MathF.Max(0, CurrentSpeed - _perceivedLeadSpeed);
+        var reactDistance = gap + PhysicsUtils.CalculateBrakingDistance(closing, EntryCar.AiDeceleration) * 1.5f + closing * _personality.ReactionSeconds;
+        if (leadDistance > reactDistance) return float.MaxValue;
+        return MathF.Max(0, _perceivedLeadSpeed + Math.Clamp((leadDistance - gap) * 0.25f, -6f, 2f));
+    }
+
+    /// <summary>Brake-checks a player who sits too close behind for too long, if this driver's personality does that.</summary>
+    private void UpdateTailgating()
+    {
+        var now = _sessionManager.ServerTimeMilliseconds;
+        var dt = _lastObstacleTick > 0 ? Math.Clamp((now - _lastObstacleTick) / 1000f, 0, 0.5f) : 0.1f;
+        _lastObstacleTick = now;
+        var bt = BT;
+        if (_personality.BrakeCheckChance <= 0 || CurrentSpeed < 40 / 3.6f || _crashMode != AiCrashMode.None)
+        {
+            _tailgateSeconds = 0;
+            return;
+        }
+
+        var tailgated = false;
+        // bumper gap: car lengths are often not configured (0), assume at least a normal car
+        var maxDistance = bt.TailgateMeters + MathF.Max(2.2f, EntryCar.VehicleLengthPostMeters) + 2.3f;
+        for (var i = 0; i < _entryCarManager.EntryCars.Length; i++)
+        {
+            var car = _entryCarManager.EntryCars[i];
+            if (car.Client?.HasSentFirstUpdate != true) continue;
+            if (Vector3.DistanceSquared(car.Status.Position, Status.Position) > maxDistance * maxDistance) continue;
+            if (Math.Abs(car.Status.Position.Y - Status.Position.Y) > 1.5f) continue;
+            if (car.Status.Velocity.Length() < 30 / 3.6f) continue;
+            if (GetAngleToCar(car.Status) is > 12 and < 348) continue; // not right behind
+            tailgated = true;
+            break;
+        }
+
+        _tailgateSeconds = tailgated ? _tailgateSeconds + dt : MathF.Max(0, _tailgateSeconds - dt * 2);
+        if (_tailgateSeconds < bt.TailgateSeconds || now < _brakeCheckCooldownUntil) return;
+        _tailgateSeconds = 0;
+        _brakeCheckCooldownUntil = now + (long)(bt.BrakeCheckCooldownSeconds * 1000);
+        if (Random.Shared.NextSingle() < _personality.BrakeCheckChance)
+        {
+            Log.Debug("BetterTraffic: AI {SessionId} ({Personality}) brake-checks a tailgater", EntryCar.SessionId, _personality.Name);
+            BrakeCheck();
+        }
+    }
+
+    /// <summary>No player close behind in this car's own lane (to rejoin after pulling over).</summary>
+    private bool IsOwnLaneClearBehind(float meters)
+    {
+        for (var i = 0; i < _entryCarManager.EntryCars.Length; i++)
+        {
+            var car = _entryCarManager.EntryCars[i];
+            if (car.Client?.HasSentFirstUpdate != true) continue;
+            if (Vector3.DistanceSquared(car.Status.Position, Status.Position) > meters * meters) continue;
+            if (GetAngleToCar(car.Status) is < 30 or > 330) return false;
+        }
         return true;
     }
 
-    /// <summary>Brake check: a short, sharp slowdown (not a stop) for AiParams.Traffic2.BrakeCheckSeconds.</summary>
+    /// <summary>
+    /// BetterTraffic: a player car at <paramref name="otherPosition"/> moving at <paramref name="otherVelocity"/> hit this
+    /// car. Small knocks: brake and carry on. Medium: pull over with hazards, then rejoin. Big: the car is pushed, slides,
+    /// spins and can roll over (simulated here, so every player sees the same), and stays as a wreck.
+    /// Call on the server update loop.
+    /// </summary>
+    /// <param name="impactKph">Impact speed reported by the game (CollisionEventArgs.Speed); negative = work it out from the velocities.</param>
+    /// <param name="contactPosition">World position of the contact, if known (spins the car when off-centre).</param>
+    public AiCrashMode Crash(Vector3 otherPosition, Vector3 otherVelocity, float impactKph = -1, Vector3? contactPosition = null)
+    {
+        if (!Initialized) return AiCrashMode.None;
+        var bt = BT;
+
+        var rel = otherVelocity - Status.Velocity;
+        rel.Y = 0;
+        var normal = Status.Position - otherPosition;
+        normal.Y = 0;
+        if (normal.LengthSquared() > 0.01f) normal = Vector3.Normalize(normal);
+        else if (rel.LengthSquared() > 0.01f) normal = Vector3.Normalize(rel);
+        else normal = Vector3.UnitX;
+        var closing = MathF.Max(Vector3.Dot(rel, normal), rel.Length() * 0.5f);
+        // positions reach the server late, the game's own impact speed is more accurate
+        if (impactKph >= 0) closing = impactKph / 3.6f;
+        var kph = closing * 3.6f;
+        var contact = contactPosition is { } cp && cp != Vector3.Zero && Vector3.DistanceSquared(cp, Status.Position) < 6 * 6 ? cp : otherPosition;
+
+        if (_crashMode is AiCrashMode.Sliding or AiCrashMode.Wrecked)
+        {
+            // hit again: push it further
+            if (bt.CrashPhysics) Push(contact, normal, closing);
+            if (_crashMode == AiCrashMode.Wrecked && closing > 2)
+            {
+                _crashMode = AiCrashMode.Sliding;
+                BetterTrafficCrash?.Invoke(this, AiCrashPhase.Hit, kph);
+            }
+            return _crashMode;
+        }
+
+        if (!bt.CrashPhysics || kph < bt.MinorCrashKph)
+        {
+            StopForCollision();
+            return AiCrashMode.None;
+        }
+
+        _crashImpactKph = kph;
+        _crashSince = _sessionManager.ServerTimeMilliseconds;
+        if (kph < bt.HeavyCrashKph)
+        {
+            if (bt.PullOverAfterCrash)
+            {
+                _crashMode = AiCrashMode.PullOver;
+                _pullOverRejoining = false;
+                _pullOverUntil = _crashSince + (long)(bt.PullOverSeconds * 1000);
+                Log.Debug("BetterTraffic: AI {SessionId} hit at {Kph:F0} km/h, pulling over", EntryCar.SessionId, kph);
+            }
+            else
+            {
+                StopForCollision();
+            }
+            BetterTrafficCrash?.Invoke(this, AiCrashPhase.Hit, kph);
+            return _crashMode;
+        }
+
+        // big crash: from here on the car is simulated freely
+        _lcDirection = 0;
+        _lcRequest = 0;
+        _laneChangeIndicator = 0;
+        _crashMode = AiCrashMode.Sliding;
+        _crashPosition = Status.Position;
+        _crashVelocity = Status.Velocity with { Y = 0 };
+        _crashYaw = Status.Rotation.X;
+        _crashPitch = Status.Rotation.Y;
+        _crashRoll = Status.Rotation.Z;
+        _crashYawRate = 0;
+        _crashRollTarget = 0;
+        CurrentSpeed = 0;
+        TargetSpeed = 0;
+        Acceleration = 0;
+        Push(contact, normal, closing);
+        if (kph >= bt.RolloverKph && Random.Shared.NextSingle() < bt.RolloverChance)
+        {
+            var side = Random.Shared.Next(2) == 0 ? -1 : 1;
+            _crashRollTarget = _crashRoll + side * (Random.Shared.Next(3) == 0 ? MathF.PI : MathF.PI / 2);
+        }
+        Log.Debug("BetterTraffic: AI {SessionId} crashed at {Kph:F0} km/h{Rollover}", EntryCar.SessionId, kph, _crashRollTarget != 0 ? ", rolling over" : "");
+        BetterTrafficCrash?.Invoke(this, AiCrashPhase.Hit, kph);
+        return _crashMode;
+    }
+
+    /// <summary>Momentum from the player's car (lighter than traffic: TrafficMassKg vs PlayerMassKg), plus spin from an off-centre hit.</summary>
+    private void Push(Vector3 contact, Vector3 normal, float closing)
+    {
+        var bt = BT;
+        var share = bt.PlayerMassKg / MathF.Max(1, bt.PlayerMassKg + bt.TrafficMassKg);
+        var dv = normal * (closing * share * 1.3f); // 1.3 = 1 + restitution
+        _crashVelocity += dv;
+        var r = contact - Status.Position;
+        r.Y = 0;
+        if (r.LengthSquared() > 2.2f * 2.2f) r = Vector3.Normalize(r) * 2.2f;
+        // yaw (rotation X) grows from +X towards +Z, the opposite of a positive rotation about +Y
+        var spin = -(r.Z * dv.X - r.X * dv.Z) / 2.0f;
+        _crashYawRate = Math.Clamp(_crashYawRate + spin + Random.Shared.NextSingle(-0.4f, 0.4f), -5, 5);
+    }
+
+    private void UpdateCrash(float dt, long now)
+    {
+        var bt = BT;
+        var speed = _crashVelocity.Length();
+        if (_crashMode == AiCrashMode.Sliding)
+        {
+            var newSpeed = MathF.Max(0, speed - bt.CrashSlideDeceleration * dt);
+            if (speed > 0) _crashVelocity *= newSpeed / speed;
+            _crashPosition += _crashVelocity * dt;
+            _crashYaw += _crashYawRate * dt;
+            _crashYawRate *= MathF.Exp(-1.4f * dt);
+            if (_crashRollTarget != 0 && _crashRoll != _crashRollTarget)
+            {
+                var step = 4.5f * dt * MathF.Sign(_crashRollTarget - _crashRoll);
+                _crashRoll = MathF.Abs(_crashRollTarget - _crashRoll) <= MathF.Abs(step) ? _crashRollTarget : _crashRoll + step;
+            }
+            speed = newSpeed;
+            if (speed < 0.3f && MathF.Abs(_crashYawRate) < 0.15f && (_crashRollTarget == 0 || _crashRoll == _crashRollTarget))
+            {
+                _crashMode = AiCrashMode.Wrecked;
+                _crashVelocity = Vector3.Zero;
+                _crashYawRate = 0;
+                speed = 0;
+                _crashSince = now;
+                Log.Debug("BetterTraffic: AI {SessionId} came to rest", EntryCar.SessionId);
+                BetterTrafficCrash?.Invoke(this, AiCrashPhase.Settled, _crashImpactKph);
+            }
+        }
+        else if (now - _crashSince > bt.WreckMaxSeconds * 1000 || !IsPlayerWithin(bt.WreckClearMeters))
+        {
+            Log.Debug("BetterTraffic: AI {SessionId} wreck cleared", EntryCar.SessionId);
+            BetterTrafficCrash?.Invoke(this, AiCrashPhase.Cleared, _crashImpactKph);
+            Despawn();
+            return;
+        }
+
+        FollowSplineHeight(_crashPosition);
+        var groundY = _spline.Points[CurrentSplinePointId].Position.Y + EntryCar.AiSplineHeightOffsetMeters;
+        var lift = (1 - MathF.Cos(_crashRoll)) * 0.75f; // rolled cars sit higher (on their side / roof)
+        Status.Timestamp = now;
+        Status.Position = _crashPosition with { Y = groundY + MathF.Max(0, lift) };
+        Status.Rotation = new Vector3(_crashYaw, _crashPitch, _crashRoll);
+        Status.Velocity = _crashVelocity;
+        Status.SteerAngle = 127;
+        Status.WheelAngle = 127;
+        for (var i = 0; i < 4; i++) Status.TyreAngularSpeed[i] = 100; // locked wheels
+        Status.EngineRpm = (ushort)EntryCar.AiIdleEngineRpm;
+        Status.StatusFlag = GetLights(_configuration.Extra.AiParams.EnableDaytimeLights, _weatherManager.CurrentSunPosition, _randomTwilight)
+                            | (_crashRollTarget == 0 ? CarStatusFlags.HazardsOn : 0)
+                            | CarStatusFlags.BrakeLightsOn;
+        Status.Gear = 1;
+    }
+
+    /// <summary>Keeps CurrentSplinePointId on the spline point nearest to a free-moving (crashed) car, for ground height and obstacle lookups.</summary>
+    private void FollowSplineHeight(Vector3 position)
+    {
+        var points = _spline.Points;
+        for (var i = 0; i < 4; i++)
+        {
+            var current = CurrentSplinePointId;
+            var best = current;
+            var bestDistance = Vector3.DistanceSquared(points[current].Position, position);
+            foreach (var candidate in new[] { points[current].NextId, points[current].PreviousId })
+            {
+                if (candidate < 0) continue;
+                var d = Vector3.DistanceSquared(points[candidate].Position, position);
+                if (d < bestDistance)
+                {
+                    best = candidate;
+                    bestDistance = d;
+                }
+            }
+            if (best == current) break;
+            CurrentSplinePointId = best;
+        }
+    }
+
+    private bool IsPlayerWithin(float meters)
+    {
+        for (var i = 0; i < _entryCarManager.EntryCars.Length; i++)
+        {
+            var car = _entryCarManager.EntryCars[i];
+            if (car.Client?.HasSentFirstUpdate == true && Vector3.DistanceSquared(car.Status.Position, Status.Position) < meters * meters) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Sideways offset for pulling over after a minor crash: onto the shoulder from the slow lane, otherwise to the slow side of the lane.</summary>
+    private Vector3 AdvancePullOver(float dt, Vector3 tangent)
+    {
+        if (_pullOverRejoining)
+        {
+            _pullOverProgress -= dt / 3.0f;
+            if (_pullOverProgress <= 0)
+            {
+                _pullOverProgress = 0;
+                _crashMode = AiCrashMode.None;
+                _lcCooldownUntil = _sessionManager.ServerTimeMilliseconds + 3000;
+                return Vector3.Zero;
+            }
+        }
+        else
+        {
+            _pullOverProgress = MathF.Min(1, _pullOverProgress + dt / 2.5f);
+        }
+
+        var slow = SlowSideDirection;
+        Vector3 direction;
+        float meters;
+        var slowAdjacent = AdjacentPoint(CurrentSplinePointId, slow);
+        var fastAdjacent = AdjacentPoint(CurrentSplinePointId, -slow);
+        if (slowAdjacent >= 0)
+        {
+            direction = LateralLaneVector(slowAdjacent, tangent);
+            meters = 0.6f; // other lanes on that side: just keep to the edge of this lane
+        }
+        else
+        {
+            direction = fastAdjacent >= 0 ? -LateralLaneVector(fastAdjacent, tangent) : RightVector(tangent) * slow;
+            meters = _configuration.Extra.AiParams.LaneWidthMeters * 0.8f;
+        }
+        if (direction.LengthSquared() < 1e-4f) return Vector3.Zero;
+        return Vector3.Normalize(direction) * (meters * Smooth(_pullOverProgress));
+    }
+
+    /// <summary>Unit vector to the right of the direction of travel (worked out once from the spline's lane links).</summary>
+    private Vector3 RightVector(Vector3 tangent)
+    {
+        var cross = Vector3.Cross(tangent with { Y = 0 }, Vector3.UnitY);
+        if (cross.LengthSquared() < 1e-6f) return Vector3.Zero;
+        if (_rightSign == 0)
+        {
+            var points = _spline.Points;
+            _rightSign = 1;
+            for (var i = 0; i < points.Length; i++)
+            {
+                if (points[i].RightId < 0 || points[i].NextId < 0) continue;
+                var t = points[points[i].NextId].Position - points[i].Position;
+                var c = Vector3.Cross(t with { Y = 0 }, Vector3.UnitY);
+                _rightSign = Vector3.Dot(c, points[points[i].RightId].Position - points[i].Position) >= 0 ? 1 : -1;
+                break;
+            }
+        }
+        return Vector3.Normalize(cross) * _rightSign;
+    }
+
+    /// <summary>A player behind asked to pass (high-beam flash). Returns false if this driver ignores it.</summary>
+    public bool RequestYield()
+    {
+        if (!Initialized || !BT.Enabled || !BT.YieldOnFlash || _stubborn) return false;
+        _yieldUntil = _sessionManager.ServerTimeMilliseconds + 5000;
+        Log.Debug("BetterTraffic: AI {SessionId} asked to yield", EntryCar.SessionId);
+        return true;
+    }
+
+    /// <summary>Brake check: a short, sharp slowdown (not a stop) for AiParams.BetterTraffic.BrakeCheckSeconds.</summary>
     public void BrakeCheck()
     {
-        if (!Initialized || !T2.Enabled) return;
-        _brakeCheckUntil = _sessionManager.ServerTimeMilliseconds + (long)(T2.BrakeCheckSeconds * 1000);
+        if (!Initialized || !BT.Enabled || _crashMode != AiCrashMode.None) return;
+        _brakeCheckUntil = _sessionManager.ServerTimeMilliseconds + (long)(BT.BrakeCheckSeconds * 1000);
     }
 
     /// <summary>Lane change decisions, called from obstacle detection (every 100 ms).</summary>
     private void DecideLaneChange(AiState? closestAi, float closestAiDistance, (EntryCar? entryCar, float distance) playerObstacle)
     {
-        var t2 = T2;
+        var bt = BT;
         var now = _sessionManager.ServerTimeMilliseconds;
-        if (!t2.Enabled || !t2.LaneChanges || _lcDirection != 0 || _lcRequest != 0 || now < _lcCooldownUntil) return;
-        if (now < _stoppedForCollisionUntil || CurrentSpeed < 30 / 3.6f) return;
+        if (!bt.Enabled || !bt.LaneChanges || _lcDirection != 0 || _lcRequest != 0 || now < _lcCooldownUntil) return;
+        if (now < _stoppedForCollisionUntil || CurrentSpeed < 30 / 3.6f || _crashMode != AiCrashMode.None) return;
 
         var slow = SlowSideDirection;
         var fast = -slow;
@@ -666,10 +1101,10 @@ public class AiState : IDisposable
             if (AdjacentPoint(CurrentSplinePointId, slow) < 0)
             {
                 // already in the slow lane: the player can pass on the other side
-                Log.Debug("Traffic2: AI {SessionId} already in the slow lane, nothing to yield", EntryCar.SessionId);
+                Log.Debug("BetterTraffic: AI {SessionId} already in the slow lane, nothing to yield", EntryCar.SessionId);
                 _yieldUntil = 0;
             }
-            else if (IsLaneFree(slow, t2.LaneFreeBehindMeters, t2.LaneFreeAheadMeters))
+            else if (IsLaneFree(slow, bt.LaneFreeBehindMeters, bt.LaneFreeAheadMeters))
             {
                 _lcRequest = slow;
                 _yieldUntil = 0;
@@ -678,22 +1113,22 @@ public class AiState : IDisposable
         }
 
         // 2. overtake a slower car (AI or player) ahead
-        var deltaMs = t2.OvertakeSpeedDeltaKph / 3.6f;
-        var slowAhead = closestAi != null && closestAiDistance < t2.OvertakeLookaheadMeters
+        var deltaMs = bt.OvertakeSpeedDeltaKph * _personality.OvertakeFactor / 3.6f;
+        var slowAhead = closestAi != null && closestAiDistance < bt.OvertakeLookaheadMeters
                         && Math.Min(closestAi.CurrentSpeed, closestAi.TargetSpeed) < InitialMaxSpeed - deltaMs;
-        var playerAhead = playerObstacle.entryCar != null && playerObstacle.distance < t2.OvertakeLookaheadMeters
+        var playerAhead = playerObstacle.entryCar != null && playerObstacle.distance < bt.OvertakeLookaheadMeters
                           && playerObstacle.entryCar.Status.Velocity.Length() < InitialMaxSpeed - deltaMs;
         if (slowAhead || playerAhead)
         {
-            if (IsLaneFree(fast, t2.LaneFreeBehindMeters, t2.LaneFreeAheadMeters)) _lcRequest = fast;
-            else if (IsLaneFree(slow, t2.LaneFreeBehindMeters, t2.LaneFreeAheadMeters)) _lcRequest = slow; // undertake as a last resort
+            if (IsLaneFree(fast, bt.LaneFreeBehindMeters, bt.LaneFreeAheadMeters)) _lcRequest = fast;
+            else if (IsLaneFree(slow, bt.LaneFreeBehindMeters, bt.LaneFreeAheadMeters)) _lcRequest = slow; // undertake as a last resort
             return;
         }
 
         // 3. keep to the slow lane when it's free for a good while ahead
         if (AdjacentPoint(CurrentSplinePointId, slow) >= 0
-            && Random.Shared.NextSingle() < t2.ReturnToSlowLaneChance * 0.1f
-            && IsLaneFree(slow, t2.LaneFreeBehindMeters, t2.LaneFreeAheadMeters * 3))
+            && Random.Shared.NextSingle() < bt.ReturnToSlowLaneChance * _personality.ReturnFactor * 0.1f
+            && IsLaneFree(slow, bt.LaneFreeBehindMeters, bt.LaneFreeAheadMeters * 3))
         {
             _lcRequest = slow;
         }
@@ -713,15 +1148,16 @@ public class AiState : IDisposable
     private Vector3 AdvanceLaneChange(float dtSeconds, Vector3 lanePosition, Vector3 tangent, out Vector3 lateralVelocity)
     {
         lateralVelocity = Vector3.Zero;
-        if (!T2.Enabled) return Vector3.Zero;
+        if (!BT.Enabled) return Vector3.Zero;
 
         if (_lcDirection == 0 && _lcRequest != 0)
         {
             _lcDirection = _lcRequest;
             _lcRequest = 0;
             _lcProgress = 0;
-            _laneChangeIndicator = _lcDirection < 0 ? CarStatusFlags.IndicateLeft : CarStatusFlags.IndicateRight;
-            Log.Debug("Traffic2: AI {SessionId} lane change {Direction} at {Speed:F0} km/h", EntryCar.SessionId, _lcDirection < 0 ? "left" : "right", CurrentSpeed * 3.6f);
+            _laneChangeIndicator = Random.Shared.NextSingle() >= _personality.IndicatorUse ? 0
+                : _lcDirection < 0 ? CarStatusFlags.IndicateLeft : CarStatusFlags.IndicateRight;
+            Log.Debug("BetterTraffic: AI {SessionId} lane change {Direction} at {Speed:F0} km/h", EntryCar.SessionId, _lcDirection < 0 ? "left" : "right", CurrentSpeed * 3.6f);
         }
         if (_lcDirection == 0) return Vector3.Zero;
 
@@ -757,7 +1193,7 @@ public class AiState : IDisposable
         _lcDirection = 0;
         _lcProgress = 0;
         _laneChangeIndicator = 0;
-        _lcCooldownUntil = _sessionManager.ServerTimeMilliseconds + (long)(T2.LaneChangeCooldownSeconds * 1000);
+        _lcCooldownUntil = _sessionManager.ServerTimeMilliseconds + (long)(BT.LaneChangeCooldownSeconds * 1000);
     }
 
     /// <summary>
@@ -843,6 +1279,12 @@ public class AiState : IDisposable
         long dt = currentTime - _lastTick;
         _lastTick = currentTime;
 
+        if (_crashMode is AiCrashMode.Sliding or AiCrashMode.Wrecked)
+        {
+            UpdateCrash(dt / 1000.0f, currentTime);
+            return;
+        }
+
         if (Acceleration != 0)
         {
             CurrentSpeed += Acceleration * (dt / 1000.0f);
@@ -868,7 +1310,7 @@ public class AiState : IDisposable
             _endTangent, 
             _currentVecProgress / _currentVecLength);
             
-        if (_configuration.Extra.AiParams.Traffic2.Enabled)
+        if (_configuration.Extra.AiParams.BetterTraffic.Enabled)
         {
             var lateral = AdvanceLaneChange(dt / 1000.0f, smoothPos.Position, smoothPos.Tangent, out var lateralVelocity);
             if (_swayAmplitude > 0)
@@ -877,6 +1319,7 @@ public class AiState : IDisposable
                 if (right.LengthSquared() > 0.0001f)
                     lateral += Vector3.Normalize(right) * (MathF.Sin(currentTime / 1000.0f * _swayFrequency * MathF.PI * 2 + _swayPhase) * _swayAmplitude);
             }
+            if (_crashMode == AiCrashMode.PullOver) lateral += AdvancePullOver(dt / 1000.0f, smoothPos.Tangent);
             smoothPos.Position += lateral;
             if (CurrentSpeed > 1 && lateralVelocity != Vector3.Zero)
                 smoothPos.Tangent = Vector3.Normalize(smoothPos.Tangent * CurrentSpeed + lateralVelocity);
@@ -904,11 +1347,11 @@ public class AiState : IDisposable
         Status.TyreAngularSpeed[3] = encodedTyreAngularSpeed;
         Status.EngineRpm = (ushort)MathUtils.Lerp(EntryCar.AiIdleEngineRpm, EntryCar.AiMaxEngineRpm, CurrentSpeed / _configuration.Extra.AiParams.MaxSpeedMs);
         Status.StatusFlag = GetLights(_configuration.Extra.AiParams.EnableDaytimeLights, _weatherManager.CurrentSunPosition, _randomTwilight)
-                            | (_sessionManager.ServerTimeMilliseconds < _stoppedForCollisionUntil || CurrentSpeed < 20 / 3.6f ? CarStatusFlags.HazardsOn : 0)
+                            | (_sessionManager.ServerTimeMilliseconds < _stoppedForCollisionUntil || CurrentSpeed < 20 / 3.6f || _crashMode != AiCrashMode.None ? CarStatusFlags.HazardsOn : 0)
                             | (CurrentSpeed == 0 || Acceleration < 0 ? CarStatusFlags.BrakeLightsOn : 0)
                             | (_stoppedForObstacle && _sessionManager.ServerTimeMilliseconds > _obstacleHonkStart && _sessionManager.ServerTimeMilliseconds < _obstacleHonkEnd ? CarStatusFlags.Horn : 0)
                             | GetWiperSpeed(_weatherManager.CurrentWeather.RainIntensity)
-                            | (_laneChangeIndicator != 0 ? _laneChangeIndicator : _indicator);
+                            | (_crashMode != AiCrashMode.None ? 0 : _laneChangeIndicator != 0 ? _laneChangeIndicator : _indicator);
         Status.Gear = 2;
     }
         
@@ -935,4 +1378,20 @@ public class AiState : IDisposable
 
         return sunPosition.Value.Altitude < twilight ? lightFlags : 0;
     }
+}
+
+/// <summary>BetterTraffic: what a crash did to an AI car.</summary>
+public enum AiCrashMode
+{
+    None,
+    PullOver,
+    Sliding,
+    Wrecked,
+}
+
+public enum AiCrashPhase
+{
+    Hit,
+    Settled,
+    Cleared,
 }
