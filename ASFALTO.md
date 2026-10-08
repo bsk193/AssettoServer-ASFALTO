@@ -32,6 +32,7 @@ Every setting below sits under `AiParams.BetterTraffic`, with the defaults shown
 | **Lane sway** | Each driver drifts slightly around the lane centre, at their own rhythm. Distracted drivers drift more. | `SwayMeters: 0.25` |
 | **Brake checks** | Aggressive drivers, and occasionally normal ones, may brake-check a player who tailgates them: under 8 m behind for 2.5 s. It's a short −35 km/h slowdown, not a stop. Plugins can trigger one too. | `TailgateMeters: 8`, `TailgateSeconds: 2.5`, `BrakeCheckCooldownSeconds: 20`, `BrakeCheckDropKph: 35`, `BrakeCheckSeconds: 1.2` |
 | **Spawning** | Traffic doesn't spawn in the first 150 m of a lane that starts from nothing, such as an on-ramp or side road. Those lanes often start off the road, so cars spawned there would come out of the dirt. | `NoSpawnNearLaneStartMeters: 150` |
+| **Side roads** | No spawning on side roads either: open lanes shorter than 1 km that mostly have no neighbouring lane, such as connectors, service roads and ramps through the dirt. Traffic still turns onto them from the main road. The server log shows how many lane starts and side roads it found. | `NoSpawnOnSideRoads: true`, `SideRoadMaxMeters: 1000` |
 | **Density presets** | Fills the hourly traffic density, which AssettoServer blends between hours. Realistic is light at night with rush hours at 7–9 and 16–19; RushHour is busy all day. | `DensityPreset: None` |
 
 ### Crashes
@@ -52,6 +53,8 @@ The server sends players a small script (`bettertraffic.lua`). Settings: `Client
 - **Sparks** whenever you hit traffic, and sparks plus dust for every crash anyone has, because the server tells everyone.
 - **Damage:** crashed traffic looks damaged and dirty, and wrecks keep smoking until they're cleared.
 - **Loose parts:** bumpers, mirrors, spoilers, lights and other parts come off crashed traffic and fly off, tumble, bounce with sparks and slide to a stop, on every player's screen. The script moves them itself, so they don't depend on CSP physics. If no part names match a traffic model, it uses its mid-sized pieces instead. Big hits also throw glass. They go back on when the wreck is cleared. Settings: `LooseParts: true`, `MaxLooseParts: 6`, and `LoosePartNames`, words matched against the traffic car's mesh names.
+- **No floating wrecks:** if a simulated car comes to rest above the track (for example on the traffic car's own collider, when CSP can't switch it off), the game stops the simulation and puts it on the ground, measured with a track raycast. The server also won't leave a reported wreck hanging well above the road.
+- **Smoke stays with the wreck:** effects follow the wreck's position, not the car slot. When the same slot later shows a fresh car of that model elsewhere, the smoke and damage don't follow it and its parts come back.
 - **Log:** the script writes what it does, and anything that fails, to CSP's Lua debug log with the prefix `BetterTraffic:`.
 - **Weight:** hitting traffic gives your own car an extra push back, as if the traffic car weighed `TrafficMassKg`. `ContactWeightFactor: 0` switches this off.
 

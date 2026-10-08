@@ -332,44 +332,80 @@ public class AiState : IDisposable
             return false;
         if (BT.Enabled && BT.NoSpawnNearLaneStartMeters > 0 && DistanceFromLaneStart(spawnPointId) < BT.NoSpawnNearLaneStartMeters)
             return false;
+        if (BT.Enabled && BT.NoSpawnOnSideRoads && IsSideRoad(spawnPointId))
+            return false;
 
         return EntryCar.CanSpawnAiState(spawnPoint.Position, this);
     }
 
-    // BetterTraffic: metres from the open start of each lane (on-ramps, side roads), float.MaxValue for looped lanes.
-    // Lanes that start from nothing often start off the road, so cars spawned there come out of the dirt.
+    // BetterTraffic lane tables, built once per spline:
+    // - metres from the open start of each lane (on-ramps, side roads), float.MaxValue for looped lanes: lanes that
+    //   start from nothing often start off the road, so cars spawned there come out of the dirt;
+    // - side roads: short open lanes that mostly have no neighbouring lane (connectors, service roads, ramps through
+    //   the dirt). Traffic still drives onto them from the main road, it just doesn't appear on them.
     private static float[]? _distanceFromLaneStart;
-    private static readonly object DistanceFromLaneStartLock = new();
+    private static bool[]? _sideRoad;
+    private static readonly object LaneTablesLock = new();
+
+    private void BuildLaneTables()
+    {
+        lock (LaneTablesLock)
+        {
+            if (_distanceFromLaneStart != null) return;
+            var points = _spline.Points;
+            var distances = new float[points.Length];
+            var side = new bool[points.Length];
+            Array.Fill(distances, float.MaxValue);
+            var limit = BT.NoSpawnNearLaneStartMeters * 2;
+            var lane = new List<int>();
+            var sideRoads = 0;
+            for (var i = 0; i < points.Length; i++)
+            {
+                if (points[i].PreviousId >= 0) continue;
+
+                float distance = 0;
+                var withNeighbour = 0;
+                lane.Clear();
+                for (var id = i; id >= 0 && lane.Count < points.Length; id = points[id].NextId)
+                {
+                    if (lane.Count > 0 && id == i) break; // looped back
+                    lane.Add(id);
+                    if (distance < limit && distances[id] > distance) distances[id] = distance;
+                    if (points[id].LeftId >= 0 || points[id].RightId >= 0) withNeighbour++;
+                    distance += points[id].Length;
+                }
+
+                if (distance < BT.SideRoadMaxMeters && withNeighbour < lane.Count * 0.5f)
+                {
+                    foreach (var id in lane) side[id] = true;
+                    sideRoads++;
+                }
+            }
+            _sideRoad = side;
+            _distanceFromLaneStart = distances;
+            Log.Information("BetterTraffic: no traffic spawns near {Starts} lane starts and on {SideRoads} side roads", points.Length > 0 ? CountStarts(points) : 0, sideRoads);
+        }
+    }
+
+    private static int CountStarts(ReadOnlySpan<SplinePoint> points)
+    {
+        var count = 0;
+        foreach (ref readonly var p in points) if (p.PreviousId < 0) count++;
+        return count;
+    }
 
     private float DistanceFromLaneStart(int pointId)
     {
-        var table = _distanceFromLaneStart;
-        if (table == null)
-        {
-            lock (DistanceFromLaneStartLock)
-            {
-                table = _distanceFromLaneStart;
-                if (table == null)
-                {
-                    var points = _spline.Points;
-                    table = new float[points.Length];
-                    Array.Fill(table, float.MaxValue);
-                    var limit = BT.NoSpawnNearLaneStartMeters * 2;
-                    for (var i = 0; i < points.Length; i++)
-                    {
-                        if (points[i].PreviousId >= 0) continue;
-                        float distance = 0;
-                        for (var id = i; id >= 0 && distance < limit && table[id] > distance; id = points[id].NextId)
-                        {
-                            table[id] = distance;
-                            distance += points[id].Length;
-                        }
-                    }
-                    _distanceFromLaneStart = table;
-                }
-            }
-        }
+        if (_distanceFromLaneStart == null) BuildLaneTables();
+        var table = _distanceFromLaneStart!;
         return pointId >= 0 && pointId < table.Length ? table[pointId] : float.MaxValue;
+    }
+
+    private bool IsSideRoad(int pointId)
+    {
+        if (_sideRoad == null) BuildLaneTables();
+        var table = _sideRoad!;
+        return pointId >= 0 && pointId < table.Length && table[pointId];
     }
 
     private bool IsKeepingSafetyDistances(in SplinePoint spawnPoint, AiState? previousAi, AiState? nextAi)
@@ -1004,6 +1040,15 @@ public class AiState : IDisposable
         {
             _crashMode = AiCrashMode.Sliding; // knocked again
             started = impactKph > 0;
+        }
+
+        if (resting)
+        {
+            // never leave a wreck hanging well above the road (e.g. it came to rest on something that isn't the track)
+            FollowSplineHeight(position);
+            var groundY = _spline.Points[CurrentSplinePointId].Position.Y + EntryCar.AiSplineHeightOffsetMeters;
+            var lift = MathF.Abs(MathF.Sin(rotation.Z)) * 0.9f + MathF.Max(0, -MathF.Cos(rotation.Z)) * 1.4f;
+            if (position.Y > groundY + lift + 1.5f) position.Y = groundY + lift;
         }
 
         _physicsOwner = owner;

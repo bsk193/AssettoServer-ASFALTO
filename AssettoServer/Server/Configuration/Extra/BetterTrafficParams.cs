@@ -105,6 +105,9 @@ public class BetterTrafficParams
     // ── spawning ──
     [YamlMember(Description = "Don't spawn traffic within this distance of the start of a lane that begins from nothing (on-ramps, side roads): these often start off the road, so cars would come out of the dirt (0 = off)")]
     public float NoSpawnNearLaneStartMeters { get; set; } = 150;
+    [YamlMember(Description = "Don't spawn traffic on side roads: open lanes shorter than SideRoadMaxMeters that mostly have no neighbouring lane (connectors, service roads, ramps through the dirt). Traffic still turns onto them from the main road")]
+    public bool NoSpawnOnSideRoads { get; set; } = true;
+    public float SideRoadMaxMeters { get; set; } = 1000;
 
     // ── density ──
     [YamlMember(Description = "Traffic density preset: None (use HourlyTrafficDensity / TrafficDensity as set), Light, Normal, Heavy, Realistic (follows the time of day with rush hours), RushHour")]

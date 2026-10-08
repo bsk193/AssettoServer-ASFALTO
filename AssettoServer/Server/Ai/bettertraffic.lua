@@ -245,7 +245,7 @@ local function sendSim(index, s, resting)
   local h, p, r = rotationFrom(t.look, t.up)
   local v = resting and vec3() or s.body:getVelocity()
   sendPhysics({
-    carIndex = index, position = t.position, rotation = vec3(h, p, r * rollSign), velocity = v,
+    carIndex = index, position = resting and s.restAt or t.position, rotation = vec3(h, p, r * rollSign), velocity = v,
     impactKph = s.firstSent and 0 or s.impactKph, resting = resting and 1 or 0,
   }, false, 255)
   s.firstSent = true
@@ -276,7 +276,8 @@ local function startSim(index, car, normal, closing, impactKph, contact)
     body:setAngularVelocity(cross(r, dv) * 0.5)
     -- the traffic car's own collider would fight the body: the body takes over collisions
     pcall(physics.disableCarCollisions, index, true, true)
-    sims[index] = { body = body, started = clock, lastSend = -1, still = 0, impactKph = impactKph, sentRolls = {} }
+    sims[index] = { body = body, started = clock, lastSend = -1, still = 0, impactKph = impactKph, sentRolls = {},
+      maxSpeed = (car.velocity + dv):length() + 6, position = car.position:clone() }
   end)
   if not ok then
     log('crash physics not available, the server simulates the crash instead (' .. tostring(err) .. ')')
@@ -301,13 +302,51 @@ local function checkRollSign(index, s)
   end
 end
 
+-- Ground height under a point (track raycast), or nil.
+local function groundUnder(pos)
+  if not physics.raycastTrack then return nil end
+  local ok, distance = pcall(physics.raycastTrack, pos + vec3(0, 2, 0), vec3(0, -1, 0), 12)
+  if ok and distance and distance >= 0 then return pos.y + 2 - distance end
+  return nil
+end
+
+-- How high a car's origin (the bottom of the model) sits above the ground: 0 upright, ~0.9 on its side, ~1.4 on the roof.
+local function restingLift(up)
+  return up.y >= 0 and (1 - up.y) * 0.9 or 0.9 + (-up.y) * 0.5
+end
+
 local function updateSims(dt)
   for index, s in pairs(sims) do
     local ok = pcall(function()
-      local speed = s.body:getVelocity():length()
+      local velocity = s.body:getVelocity()
+      local speed = velocity:length()
+      -- right after the hit the body must not shoot off (e.g. pushed out of a collider it overlaps)
+      if clock - s.started < 0.5 and speed > s.maxSpeed then
+        s.body:setVelocity(velocity:clone():normalize() * s.maxSpeed)
+        speed = s.maxSpeed
+      end
       local spin = s.body:getAngularVelocity():length()
       s.still = (speed < 0.5 and spin < 0.3) and s.still + dt or 0
+      local t = s.body:getTransformation()
+      s.position = t.position:clone()
+      if damaged[index] then damaged[index].position = s.position end
+
+      -- resting on something that isn't the track (the traffic car's own collider, when CSP can't switch it off):
+      -- stop the simulation and put the car on the ground instead of leaving it floating
+      local ground = groundUnder(t.position)
+      if ground then
+        local gap = t.position.y - (ground + restingLift(t.up))
+        s.hover = (gap > 0.5 and math.abs(velocity.y) < 1.5) and (s.hover or 0) + dt or 0
+        if s.hover > 0.4 then
+          log(string.format('car %d rested %.1f m above the track, put on the ground', index, gap))
+          s.restAt = vec3(t.position.x, ground + restingLift(t.up), t.position.z)
+          endSim(index, s)
+          return
+        end
+      end
+
       if s.still > 1.5 or clock - s.started > 15 then
+        if ground then s.restAt = vec3(t.position.x, math.min(t.position.y, ground + restingLift(t.up) + 0.1), t.position.z) end
         endSim(index, s)
         return
       end
@@ -354,6 +393,8 @@ ac.OnlineEvent({
   d.position = data.position
   d.smoke = not minor and data.impactKph > 60
   d.expires = clock + (minor and 60 or 240)
+  if data.phase == PHASE_SETTLED then d.settled = true end
+  if data.phase == PHASE_HIT then d.settled, d.hitAt = false, clock end
   damaged[index] = d
 
   if data.phase == PHASE_HIT then
@@ -394,6 +435,7 @@ ac.onCarCollision(0, function()
     d.position = car.position
     d.smoke = impactKph > 60
     d.expires = clock + 240
+    d.settled, d.hitAt = false, clock
     damaged[car.index] = d
     if #d.parts == 0 then
       for _, part in ipairs(detachParts(car.index, car, impactKph, normal)) do d.parts[#d.parts + 1] = part end
@@ -413,14 +455,29 @@ function script.update(dt)
   updateSims(dt)
   for index, d in pairs(damaged) do
     local car = ac.getCar(index)
-    -- with traffic overbooking a car slot can show another traffic car for you: only damage it near the crash
-    local near = car and d.position and (car.position:distance(d.position) < 40 or sims[index] ~= nil)
+    -- Is this car slot still showing the crashed car? After the wreck is cleared (or with traffic overbooking) the same
+    -- slot shows another traffic car of the same model. A wreck stands still where the server said it came to rest;
+    -- before that it's near the crash. A moving car anywhere else is a different car: no smoke, damage or missing parts.
+    local near = false
+    if car and d.position then
+      if sims[index] then
+        near = true
+      elseif d.settled then
+        near = car.position:distance(d.position) < 8 and car.speedKmh < 20
+      else
+        near = car.position:distance(d.position) < 45
+      end
+    end
     if clock > d.expires or not car then
       if d.applied then setDamage(index, 0) end
       restoreParts(d)
       damaged[index] = nil
+    elseif not near and (d.settled or clock - (d.hitAt or 0) > 15) and car.speedKmh > 30 and car.position:distance(d.position) > 60 then
+      -- a fresh car in this slot: give it its parts back and forget the wreck
+      if d.applied then setDamage(index, 0) end
+      restoreParts(d)
+      damaged[index] = nil
     else
-      if near then d.position = car.position end -- follow the wreck while it moves
       if near and not d.applied then
         setDamage(index, d.level)
         d.applied = true
