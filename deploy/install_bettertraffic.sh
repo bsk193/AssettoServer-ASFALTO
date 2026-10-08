@@ -9,6 +9,14 @@ cd "$(dirname "$0")"
 if [ ! -f AssettoServer.asfalto ]; then
   echo "AssettoServer.asfalto not found: extract the archive in the server folder first."; exit 1
 fi
+
+# stop the server before replacing its binary
+if [ -f ./lsp.sh ]; then
+  if [ -x ./lsp.sh ]; then ./lsp.sh stop || echo "./lsp.sh stop failed (already stopped?), continuing"
+  else sh ./lsp.sh stop || echo "./lsp.sh stop failed (already stopped?), continuing"; fi
+else
+  echo "No ./lsp.sh here: make sure the server is stopped."
+fi
 if [ -f AssettoServer ] && [ ! -f AssettoServer.upstream ]; then
   cp AssettoServer AssettoServer.upstream
   echo "Backed up the current server to AssettoServer.upstream"
