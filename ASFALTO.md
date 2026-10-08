@@ -35,28 +35,30 @@ Every setting below sits under `AiParams.BetterTraffic`, with the defaults shown
 
 ### Crashes
 
-The server simulates crashes, so every player sees the same thing.
+Every player sees the same crash. Big crashes are simulated by the hitting player's game with CSP's rigid-body physics, so the car hits the real track: walls, kerbs, the ground. That game sends the car's position about 15 times a second, and the server shows it to everyone. If that player's game can't simulate it, or stops reporting, the server takes over with a simpler slide.
 
 | Impact speed | What happens |
 |---|---|
 | Under 25 km/h | The car brakes, puts its hazards on, and carries on, like upstream. |
 | 25–50 km/h | It pulls over with hazards: onto the shoulder from the slow lane, otherwise to the slow edge of its lane. It waits 8 s, then rejoins when no player is close behind. |
-| 50 km/h and up | The car is pushed, using momentum with traffic at 3000 kg against a 1400 kg player car. It slides, spins if hit off-centre, and above 90 km/h can roll onto its side or roof (35 % chance). It then stays as a wreck with hazards on. It's cleared once no player is within 250 m, or after 90 s. Hitting a wreck pushes it further. |
+| 50 km/h and up | The car is pushed, using momentum with traffic at 3000 kg against the player's car. It tumbles under real physics on the hitting player's game; the server's fallback slide spins it, and above 90 km/h can roll it (35 % chance). Parts come off. It then stays as a wreck. It's cleared once no player is within 250 m, or after 90 s. Hitting a wreck knocks it again. |
 
-**Settings:** `CrashPhysics: true`, `TrafficMassKg: 3000`, `PlayerMassKg: 1400`, `MinorCrashKph: 25`, `HeavyCrashKph: 50`, `RolloverKph: 90`, `RolloverChance: 0.35`, `CrashSlideDeceleration: 6`, `PullOverAfterCrash: true`, `PullOverSeconds: 8`, `WreckClearMeters: 250`, `WreckMaxSeconds: 90`.
+**Settings:** `CrashPhysics: true`, `TrafficMassKg: 3000`, `PlayerMassKg: 1400`, `MinorCrashKph: 25`, `HeavyCrashKph: 50`, `RolloverKph: 90`, `RolloverChance: 0.35`, `CrashSlideDeceleration: 6`, `PullOverAfterCrash: true`, `PullOverSeconds: 8`, `WreckClearMeters: 250`, `WreckMaxSeconds: 90`, `ClientCrashPhysics: true`.
 
 ### Client effects
 
 The server sends players a small script (`bettertraffic.lua`). Settings: `ClientEffects: true`, `ContactWeightFactor: 0.6`.
 - **Sparks** whenever you hit traffic, and sparks plus dust for every crash anyone has, because the server tells everyone.
 - **Damage:** crashed traffic looks damaged and dirty, and wrecks keep smoking until they're cleared.
+- **Loose parts:** bumpers, mirrors, spoilers, lights and other parts come off crashed traffic and bounce around as their own physics bodies, on every player's screen. They go back on when the wreck is cleared. Settings: `LooseParts: true`, `MaxLooseParts: 4`, and `LoosePartNames`, words matched against the traffic car's mesh names.
+- **Log:** the script writes what it does, and anything that fails, to CSP's Lua debug log with the prefix `BetterTraffic:`.
 - **Weight:** hitting traffic gives your own car an extra push back, as if the traffic car weighed `TrafficMassKg`. `ContactWeightFactor: 0` switches this off.
 
 ### For plugins
 
 - `AiState.RequestYield()`
 - `AiState.BrakeCheck()`
-- `AiState.Crash(position, velocity, impactKph, contact)`
+- `AiState.Crash(position, velocity, impactKph, contact)`, `AiState.ApplyClientPhysics(...)`, `AiState.SimulatedBy`
 - `AiState.LaneChangeDirection`
 - `AiState.PersonalityName`
 - `AiState.CrashMode`
@@ -94,4 +96,3 @@ The client script was checked against a stub of CSP's Lua API.
 ### Not done
 
 - **Damaged models:** damaged ("Copart") skins need damaged art for each traffic model, so the client darkens and dents the existing model instead.
-- **Physics on players' PCs:** crash physics run on the server rather than on a player's PC, which keeps them identical for everyone but simpler than a full physics engine.

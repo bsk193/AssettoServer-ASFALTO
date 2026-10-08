@@ -97,6 +97,11 @@ public class AiState : IDisposable
     private float _crashImpactKph;
     private long _crashSince;
     private long _pullOverUntil;
+    private byte _physicsOwner = 255;   // player whose game simulates the crashed car, 255 = none
+    private long _physicsReportAt;
+    private Vector3 _reportPosition;
+    private Vector3 _reportVelocity;
+    private bool _frozenAtReport;
     private float _pullOverProgress;
     private bool _pullOverRejoining;
     private static int _rightSign; // sign that turns Cross(tangent, Y) into "towards the right-hand lane", 0 = not known yet
@@ -632,6 +637,8 @@ public class AiState : IDisposable
         _brakeCheckUntil = 0;
         _laneChangeIndicator = 0;
         _crashMode = AiCrashMode.None;
+        _physicsOwner = 255;
+        _frozenAtReport = false;
         _crashRoll = 0;
         _crashRollTarget = 0;
         _pullOverProgress = 0;
@@ -846,6 +853,8 @@ public class AiState : IDisposable
 
         if (_crashMode is AiCrashMode.Sliding or AiCrashMode.Wrecked)
         {
+            // a player's game simulates this car: it handles the hit itself
+            if (IsClientSimulated) return _crashMode;
             // hit again: push it further
             if (bt.CrashPhysics) Push(contact, normal, closing);
             if (_crashMode == AiCrashMode.Wrecked && closing > 2)
@@ -882,6 +891,21 @@ public class AiState : IDisposable
         }
 
         // big crash: from here on the car is simulated freely
+        StartFreeMotion();
+        Push(contact, normal, closing);
+        if (kph >= bt.RolloverKph && Random.Shared.NextSingle() < bt.RolloverChance)
+        {
+            var side = Random.Shared.Next(2) == 0 ? -1 : 1;
+            _crashRollTarget = _crashRoll + side * (Random.Shared.Next(3) == 0 ? MathF.PI : MathF.PI / 2);
+        }
+        Log.Debug("BetterTraffic: AI {SessionId} crashed at {Kph:F0} km/h{Rollover}", EntryCar.SessionId, kph, _crashRollTarget != 0 ? ", rolling over" : "");
+        BetterTrafficCrash?.Invoke(this, AiCrashPhase.Hit, kph);
+        return _crashMode;
+    }
+
+    /// <summary>Leaves the spline: from now on the car moves freely (simulated by the server or a player's game).</summary>
+    private void StartFreeMotion()
+    {
         _lcDirection = 0;
         _lcRequest = 0;
         _laneChangeIndicator = 0;
@@ -896,15 +920,64 @@ public class AiState : IDisposable
         CurrentSpeed = 0;
         TargetSpeed = 0;
         Acceleration = 0;
-        Push(contact, normal, closing);
-        if (kph >= bt.RolloverKph && Random.Shared.NextSingle() < bt.RolloverChance)
+    }
+
+    /// <summary>A player's game is simulating this crashed car and reported recently.</summary>
+    public bool IsClientSimulated => _physicsOwner != 255 && _sessionManager.ServerTimeMilliseconds - _physicsReportAt < 600;
+
+    /// <summary>Session id of the player whose game simulates this crashed car, 255 if none (the server does).</summary>
+    public byte SimulatedBy => IsClientSimulated ? _physicsOwner : (byte)255;
+
+    /// <summary>
+    /// BetterTraffic: the crashed car as simulated by a player's game (CSP rigid body against the real track), shown to
+    /// everybody. The first player to report owns the simulation until they stop reporting. Call on the server update loop.
+    /// </summary>
+    public void ApplyClientPhysics(byte owner, Vector3 position, Vector3 rotation, Vector3 velocity, float impactKph, bool resting)
+    {
+        if (!Initialized || !BT.Enabled || !BT.CrashPhysics) return;
+        var now = _sessionManager.ServerTimeMilliseconds;
+        if (IsClientSimulated && _physicsOwner != owner) return;
+
+        var started = false;
+        if (_crashMode is not (AiCrashMode.Sliding or AiCrashMode.Wrecked))
         {
-            var side = Random.Shared.Next(2) == 0 ? -1 : 1;
-            _crashRollTarget = _crashRoll + side * (Random.Shared.Next(3) == 0 ? MathF.PI : MathF.PI / 2);
+            if (impactKph <= 0) return; // a stale message for a car that's back on the road
+            StartFreeMotion();
+            _crashImpactKph = impactKph;
+            _crashSince = now;
+            started = true;
         }
-        Log.Debug("BetterTraffic: AI {SessionId} crashed at {Kph:F0} km/h{Rollover}", EntryCar.SessionId, kph, _crashRollTarget != 0 ? ", rolling over" : "");
-        BetterTrafficCrash?.Invoke(this, AiCrashPhase.Hit, kph);
-        return _crashMode;
+        else if (_crashMode == AiCrashMode.Wrecked && !resting)
+        {
+            _crashMode = AiCrashMode.Sliding; // knocked again
+            started = impactKph > 0;
+        }
+
+        _physicsOwner = owner;
+        _physicsReportAt = now;
+        _reportPosition = position;
+        _reportVelocity = velocity;
+        _crashPosition = position;
+        _crashVelocity = velocity;
+        _crashYaw = rotation.X;
+        _crashPitch = rotation.Y;
+        _crashRoll = rotation.Z;
+        _crashYawRate = 0;
+        _crashRollTarget = 0;
+        if (started)
+        {
+            Log.Debug("BetterTraffic: AI {SessionId} crashed at {Kph:F0} km/h, simulated by player {Owner}", EntryCar.SessionId, impactKph, owner);
+            BetterTrafficCrash?.Invoke(this, AiCrashPhase.Hit, impactKph);
+        }
+        if (resting && _crashMode == AiCrashMode.Sliding)
+        {
+            _crashMode = AiCrashMode.Wrecked;
+            _crashVelocity = Vector3.Zero;
+            _reportVelocity = Vector3.Zero;
+            _crashSince = now;
+            Log.Debug("BetterTraffic: AI {SessionId} came to rest", EntryCar.SessionId);
+            BetterTrafficCrash?.Invoke(this, AiCrashPhase.Settled, _crashImpactKph);
+        }
     }
 
     /// <summary>Momentum from the player's car (lighter than traffic: TrafficMassKg vs PlayerMassKg), plus spin from an off-centre hit.</summary>
@@ -925,10 +998,53 @@ public class AiState : IDisposable
     private void UpdateCrash(float dt, long now)
     {
         var bt = BT;
+        if (_crashMode == AiCrashMode.Wrecked && (now - _crashSince > bt.WreckMaxSeconds * 1000 || !IsPlayerWithin(bt.WreckClearMeters)))
+        {
+            Log.Debug("BetterTraffic: AI {SessionId} wreck cleared", EntryCar.SessionId);
+            BetterTrafficCrash?.Invoke(this, AiCrashPhase.Cleared, _crashImpactKph);
+            Despawn();
+            return;
+        }
+
+        if (_physicsOwner != 255)
+        {
+            if (IsClientSimulated)
+            {
+                // a player's game simulates it: show its last report, extrapolated a little
+                var ahead = MathF.Min(0.3f, (now - _physicsReportAt) / 1000f);
+                WriteCrashStatus(now, _reportPosition + _reportVelocity * ahead, new Vector3(_crashYaw, _crashPitch, _crashRoll), _reportVelocity);
+                return;
+            }
+
+            // the player stopped reporting (left, or too far): leave it where it was last seen
+            _physicsOwner = 255;
+            if (_crashMode == AiCrashMode.Sliding)
+            {
+                _crashMode = AiCrashMode.Wrecked;
+                _crashSince = now;
+                BetterTrafficCrash?.Invoke(this, AiCrashPhase.Settled, _crashImpactKph);
+            }
+            _reportVelocity = Vector3.Zero;
+            WriteCrashStatus(now, _reportPosition, new Vector3(_crashYaw, _crashPitch, _crashRoll), Vector3.Zero);
+            _frozenAtReport = true;
+            return;
+        }
+        if (_frozenAtReport)
+        {
+            WriteCrashStatus(now, _reportPosition, new Vector3(_crashYaw, _crashPitch, _crashRoll), Vector3.Zero);
+            return;
+        }
+
+        // the server simulates it (no player's game did): a simple slide that stays near the road
         var speed = _crashVelocity.Length();
         if (_crashMode == AiCrashMode.Sliding)
         {
-            var newSpeed = MathF.Max(0, speed - bt.CrashSlideDeceleration * dt);
+            // off the road (where the server doesn't know the ground) cars stop much sooner
+            var offRoad = Vector3.DistanceSquared(_crashPosition with { Y = 0 }, _spline.Points[CurrentSplinePointId].Position with { Y = 0 })
+                          > MathF.Pow(_configuration.Extra.AiParams.LaneWidthMeters * 1.2f, 2);
+            var deceleration = bt.CrashSlideDeceleration * (offRoad ? 3 : 1);
+            var newSpeed = MathF.Max(0, speed - deceleration * dt);
+            if (offRoad) _crashYawRate *= MathF.Exp(-3f * dt);
             if (speed > 0) _crashVelocity *= newSpeed / speed;
             _crashPosition += _crashVelocity * dt;
             _crashYaw += _crashYawRate * dt;
@@ -950,21 +1066,20 @@ public class AiState : IDisposable
                 BetterTrafficCrash?.Invoke(this, AiCrashPhase.Settled, _crashImpactKph);
             }
         }
-        else if (now - _crashSince > bt.WreckMaxSeconds * 1000 || !IsPlayerWithin(bt.WreckClearMeters))
-        {
-            Log.Debug("BetterTraffic: AI {SessionId} wreck cleared", EntryCar.SessionId);
-            BetterTrafficCrash?.Invoke(this, AiCrashPhase.Cleared, _crashImpactKph);
-            Despawn();
-            return;
-        }
 
         FollowSplineHeight(_crashPosition);
         var groundY = _spline.Points[CurrentSplinePointId].Position.Y + EntryCar.AiSplineHeightOffsetMeters;
-        var lift = (1 - MathF.Cos(_crashRoll)) * 0.75f; // rolled cars sit higher (on their side / roof)
+        // rolled cars sit higher: half the width on their side, the height on the roof
+        var lift = MathF.Abs(MathF.Sin(_crashRoll)) * 0.9f + MathF.Max(0, -MathF.Cos(_crashRoll)) * 1.4f;
+        WriteCrashStatus(now, _crashPosition with { Y = groundY + lift }, new Vector3(_crashYaw, _crashPitch, _crashRoll), _crashVelocity);
+    }
+
+    private void WriteCrashStatus(long now, Vector3 position, Vector3 rotation, Vector3 velocity)
+    {
         Status.Timestamp = now;
-        Status.Position = _crashPosition with { Y = groundY + MathF.Max(0, lift) };
-        Status.Rotation = new Vector3(_crashYaw, _crashPitch, _crashRoll);
-        Status.Velocity = _crashVelocity;
+        Status.Position = position;
+        Status.Rotation = rotation;
+        Status.Velocity = velocity;
         Status.SteerAngle = 127;
         Status.WheelAngle = 127;
         for (var i = 0; i < 4; i++) Status.TyreAngularSpeed[i] = 100; // locked wheels

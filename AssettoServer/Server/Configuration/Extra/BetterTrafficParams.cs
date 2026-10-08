@@ -108,6 +108,14 @@ public class BetterTrafficParams
     public bool ClientEffects { get; set; } = true;
     [YamlMember(Description = "Extra push on your own car when you hit traffic, to feel the traffic's weight (0 = off, 1 = full TrafficMassKg)")]
     public float ContactWeightFactor { get; set; } = 0.6f;
+    [YamlMember(Description = "Big crashes are simulated by the hitting player's game (real physics against the track: tumbling, walls, ground) and shown to everybody. Off = the server's simple slide only")]
+    public bool ClientCrashPhysics { get; set; } = true;
+    [YamlMember(Description = "Parts come off crashed traffic (bumpers, mirrors, spoilers, ...) and bounce around")]
+    public bool LooseParts { get; set; } = true;
+    [YamlMember(Description = "Name parts of traffic car models that can come off (matched case-insensitively against mesh and node names)")]
+    public List<string> LoosePartNames { get; set; } = ["bumper", "mirror", "spoiler", "wing", "lip", "splitter", "diffuser", "skirt", "plate", "exhaust", "light", "lamp", "hood", "bonnet", "door"];
+    [YamlMember(Description = "At most this many parts come off one car (fewer for slower crashes)")]
+    public int MaxLooseParts { get; set; } = 4;
 }
 
 [UsedImplicitly(ImplicitUseKindFlags.Assign, ImplicitUseTargetFlags.WithMembers)]
