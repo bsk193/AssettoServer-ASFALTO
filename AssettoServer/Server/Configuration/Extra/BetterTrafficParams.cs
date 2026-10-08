@@ -82,8 +82,11 @@ public class BetterTrafficParams
     [YamlMember(Description = "How heavy traffic is in a crash (kg); the player car is assumed to weigh PlayerMassKg")]
     public float TrafficMassKg { get; set; } = 3000;
     public float PlayerMassKg { get; set; } = 1400;
-    [YamlMember(Description = "Below this impact speed (km/h) traffic just brakes, puts the hazards on and continues")]
+    [YamlMember(Description = "Below this impact speed (km/h) a hit is a tap: traffic lifts off to 70 % speed with hazards for TapSlowdownSeconds and carries on")]
     public float MinorCrashKph { get; set; } = 25;
+    public float TapSlowdownSeconds { get; set; } = 3;
+    [YamlMember(Description = "Braking while pulling over (m/s^2): low = steers aside and rolls to a stop, high = stops dead")]
+    public float PullOverDeceleration { get; set; } = 2.5f;
     [YamlMember(Description = "From this impact speed (km/h) traffic is pushed, slides and spins, and stays as a wreck; below it, it pulls over")]
     public float HeavyCrashKph { get; set; } = 50;
     [YamlMember(Description = "Above this impact speed (km/h) traffic can roll over, with RolloverChance")]
@@ -98,6 +101,10 @@ public class BetterTrafficParams
     [YamlMember(Description = "Wrecked cars (big crash) stay with hazards on until no player is within WreckClearMeters, at most WreckMaxSeconds")]
     public float WreckClearMeters { get; set; } = 250;
     public float WreckMaxSeconds { get; set; } = 90;
+
+    // ── spawning ──
+    [YamlMember(Description = "Don't spawn traffic within this distance of the start of a lane that begins from nothing (on-ramps, side roads): these often start off the road, so cars would come out of the dirt (0 = off)")]
+    public float NoSpawnNearLaneStartMeters { get; set; } = 150;
 
     // ── density ──
     [YamlMember(Description = "Traffic density preset: None (use HourlyTrafficDensity / TrafficDensity as set), Light, Normal, Heavy, Realistic (follows the time of day with rush hours), RushHour")]
@@ -115,7 +122,7 @@ public class BetterTrafficParams
     [YamlMember(Description = "Name parts of traffic car models that can come off (matched case-insensitively against mesh and node names)")]
     public List<string> LoosePartNames { get; set; } = ["bumper", "mirror", "spoiler", "wing", "lip", "splitter", "diffuser", "skirt", "plate", "exhaust", "light", "lamp", "hood", "bonnet", "door"];
     [YamlMember(Description = "At most this many parts come off one car (fewer for slower crashes)")]
-    public int MaxLooseParts { get; set; } = 4;
+    public int MaxLooseParts { get; set; } = 6;
 }
 
 [UsedImplicitly(ImplicitUseKindFlags.Assign, ImplicitUseTargetFlags.WithMembers)]

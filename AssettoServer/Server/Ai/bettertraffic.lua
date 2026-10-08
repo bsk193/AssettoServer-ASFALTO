@@ -7,7 +7,7 @@
 
 local cfg = ac.configValues({
   AI_SLOTS = '', TRAFFIC_MASS = 3000, CONTACT_WEIGHT = 0.6, CLIENT_PHYSICS = 1, HEAVY_KPH = 50,
-  PARTS = 1, PART_NAMES = 'bumper|mirror|spoiler', MAX_PARTS = 4,
+  PARTS = 1, PART_NAMES = 'bumper|mirror|spoiler', MAX_PARTS = 6,
 })
 
 local function log(message) ac.log('BetterTraffic: ' .. message) end
@@ -18,7 +18,7 @@ local contactWeight = num(cfg.CONTACT_WEIGHT, 0.6)
 local heavyKph = num(cfg.HEAVY_KPH, 50)
 local clientPhysics = num(cfg.CLIENT_PHYSICS, 1) ~= 0
 local partsEnabled = num(cfg.PARTS, 1) ~= 0
-local maxParts = num(cfg.MAX_PARTS, 4)
+local maxParts = num(cfg.MAX_PARTS, 6)
 
 local isTraffic = {}
 for id in string.gmatch(tostring(cfg.AI_SLOTS), '%d+') do isTraffic[tonumber(id)] = true end
@@ -42,8 +42,11 @@ local smoke = ac.Particles.Smoke({ color = rgbm(0.3, 0.3, 0.3, 0.5), colorConsis
 local dust = ac.Particles.Smoke({ color = rgbm(0.55, 0.5, 0.42, 0.4), colorConsistency = 0.6, thickness = 0.6, life = 3, size = 0.9,
   spreadK = 1.5, growK = 1.6, targetYVelocity = 0.1 })
 
+local glass = ac.Particles.Sparks({ color = rgbm(0.75, 0.85, 1, 1.2), life = 1.4, size = 0.05, directionSpread = 2, positionSpread = 0.8 })
+
 local function burst(position, impactKph, withDust)
   sparks:emit(position + vec3(0, 0.4, 0), vec3(0, 2.5, 0), math.min(80, 10 + impactKph * 0.6))
+  if impactKph > 45 then glass:emit(position + vec3(0, 0.9, 0), vec3(0, 3, 0), math.min(60, impactKph * 0.4)) end
   if withDust then dust:emit(position + vec3(0, 0.3, 0), vec3(0, 0.5, 0), math.min(16, 2 + impactKph / 8)) end
 end
 
@@ -94,27 +97,51 @@ local function setDamage(index, level)
 end
 
 -- ── loose parts ────────────────────────────────────────────────────────────────────────────────────────────────
+-- Parts are moved by this script (no CSP physics needed): thrown off with the impact, tumbling, bouncing and
+-- sliding on the road until they stop. Named parts (PART_NAMES) first, otherwise any mid-sized piece of the model.
 
 local dynamicRoot = nil
 local activeParts = 0
-local MAX_ACTIVE_PARTS = 24
+local MAX_ACTIVE_PARTS = 30
+local GRAVITY = 9.81
+
+local function rotate(v, axis, angle)
+  -- Rodrigues: v rotated around a unit axis
+  local c, s = math.cos(angle), math.sin(angle)
+  return v * c + cross(axis, v) * s + axis * (axis:dot(v) * (1 - c))
+end
+
+local function partCandidates(root)
+  local named, sized = {}, {}
+  for _, filter in ipairs(partFilters) do
+    local ok, meshes = pcall(root.findMeshes, root, filter)
+    if ok and meshes then
+      for i = 1, meshes:size() do named[#named + 1] = meshes:at(i) end
+    end
+  end
+  if #named > 0 then return named end
+  -- no names matched (traffic models often have generic mesh names): any mid-sized piece of the visible model
+  local ok, meshes = pcall(root.findMeshes, root, '{ lod:A }')
+  if not ok or not meshes or meshes:size() == 0 then ok, meshes = pcall(root.findMeshes, root, '?') end
+  if ok and meshes then
+    for i = 1, meshes:size() do
+      local mesh = meshes:at(i)
+      local okSphere, _, radius = pcall(mesh.boundingSphere, mesh)
+      if okSphere and radius and radius > 0.12 and radius < 0.9 then sized[#sized + 1] = mesh end
+    end
+  end
+  return sized
+end
 
 local function detachParts(index, car, impactKph, impulseDir)
-  if not partsEnabled or #partFilters == 0 then return {} end
-  local count = math.min(maxParts, 1 + math.floor(impactKph / 35), MAX_ACTIVE_PARTS - activeParts)
+  if not partsEnabled then return {} end
+  local count = math.min(maxParts, 1 + math.floor(impactKph / 30), MAX_ACTIVE_PARTS - activeParts)
   if count <= 0 then return {} end
   if not dynamicRoot then dynamicRoot = ac.findNodes('dynamicRoot:yes') end
   local root = ac.findNodes('carRoot:' .. index)
   if not root or root:empty() then return {} end
 
-  -- candidate meshes from all name filters, picked at random
-  local candidates = {}
-  for _, filter in ipairs(partFilters) do
-    local ok, meshes = pcall(root.findMeshes, root, filter)
-    if ok and meshes then
-      for i = 1, meshes:size() do candidates[#candidates + 1] = meshes:at(i) end
-    end
-  end
+  local candidates = partCandidates(root)
   local parts = {}
   while #parts < count and #candidates > 0 do
     local mesh = table.remove(candidates, math.random(#candidates))
@@ -122,27 +149,33 @@ local function detachParts(index, car, impactKph, impulseDir)
       local parent = mesh:getParent()
       local savedLocal = mesh:getTransformationRaw():clone()
       local world = mesh:getWorldTransformationRaw():clone()
-      local center, radius = mesh:boundingSphere()
-      radius = math.max(0.08, math.min(0.8, radius or 0.3))
-      local body = physics.RigidBody({ physics.Collider.Box(vec3(radius, radius, radius) * 1.2, center or vec3()) }, 12 + radius * 25)
-      body:setTransformation(world, false)
-      local kick = (impulseDir * (impactKph / 3.6) * 0.35) + vec3(math.random() - 0.5, 0.6 + math.random(), math.random() - 0.5) * 3
-      body:setVelocity(car.velocity + kick)
-      body:setAngularVelocity(vec3(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5) * 12)
+      local _, radius = mesh:boundingSphere()
+      radius = math.max(0.1, math.min(0.9, radius or 0.3))
+      -- lighter parts fly further
+      local throw = (impactKph / 3.6) * (0.1 + 0.15 * math.random()) / (0.6 + radius)
+      local velocity = car.velocity * 0.7 + impulseDir * throw
+        + vec3(math.random() - 0.5, 0.5 + math.random() * 0.6, math.random() - 0.5) * (1.5 + impactKph / 30)
+      local axis = vec3(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5)
+      if axis:length() < 0.01 then axis = vec3(1, 0, 0) end
       mesh:setParent(dynamicRoot)
       mesh:getTransformationRaw():set(world)
-      parts[#parts + 1] = { mesh = mesh, parent = parent, savedLocal = savedLocal, body = body, until_ = clock + 20 }
+      parts[#parts + 1] = {
+        mesh = mesh, parent = parent, savedLocal = savedLocal,
+        position = world.position:clone(), look = world.look:clone(), up = world.up:clone(),
+        velocity = velocity, axis = axis:normalize(), spin = (4 + math.random() * 10) / (0.5 + radius),
+        ground = car.position.y + 0.02, radius = radius, moving = true, until_ = clock + 25,
+      }
       activeParts = activeParts + 1
     end)
     if not ok then log('part could not come off: ' .. tostring(err)) end
   end
+  if #parts == 0 then log('no loose parts found on car ' .. index) end
   return parts
 end
 
 local function stopPart(part)
-  if part.body then
-    pcall(part.body.dispose, part.body)
-    part.body = nil
+  if part.moving then
+    part.moving = false
     activeParts = activeParts - 1
   end
 end
@@ -158,14 +191,37 @@ local function restoreParts(d)
   d.parts = {}
 end
 
-local function updateParts(d)
+local function updateParts(d, dt)
   for _, part in ipairs(d.parts or {}) do
-    if part.body then
-      if clock > part.until_ then
-        stopPart(part) -- leave it lying where it stopped
-      else
-        pcall(function() part.mesh:getTransformationRaw():set(part.body:getTransformation()) end)
+    if part.moving then
+      local v = part.velocity
+      v.y = v.y - GRAVITY * dt
+      local drag = math.max(0, 1 - 0.4 * dt) -- tumbling parts are draggy
+      v.x, v.z = v.x * drag, v.z * drag
+      part.position = part.position + v * dt
+      local onGround = part.position.y <= part.ground + part.radius * 0.3
+      if onGround then
+        part.position.y = part.ground + part.radius * 0.3
+        if v.y < -1.5 then
+          -- bounce, with a few sparks for the hard ones
+          v.y = -v.y * 0.35
+          v.x, v.z = v.x * 0.6, v.z * 0.6
+          if math.abs(v.y) > 2 then sparks:emit(part.position, vec3(0, 1, 0), 4) end
+        else
+          v.y = 0
+        end
+        -- scraping along the road
+        local horizontal = vec3(v.x, 0, v.z)
+        local speed = horizontal:length()
+        local slowed = math.max(0, speed - 14 * dt)
+        if speed > 0 then v.x, v.z = v.x * slowed / speed, v.z * slowed / speed end
+        part.spin = part.spin * math.max(0, 1 - 3 * dt)
       end
+      local angle = part.spin * dt
+      part.look = rotate(part.look, part.axis, angle)
+      part.up = rotate(part.up, part.axis, angle)
+      pcall(function() part.mesh:getTransformationRaw():set(mat4x4.look(part.position, part.look, part.up)) end)
+      if (onGround and v:length() < 0.2 and part.spin < 0.3) or clock > part.until_ then stopPart(part) end
     end
   end
 end
@@ -372,7 +428,7 @@ function script.update(dt)
         setDamage(index, 0)
         d.applied = false
       end
-      updateParts(d)
+      updateParts(d, dt)
       if near and d.smoke then
         -- smoke from the engine bay, a few puffs per second, emitted as whole particles
         d.smokeAcc = (d.smokeAcc or 0) + dt * 5 * d.level

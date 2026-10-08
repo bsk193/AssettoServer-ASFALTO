@@ -31,6 +31,7 @@ Every setting below sits under `AiParams.BetterTraffic`, with the defaults shown
 | **Yield on flash** | Flash your high beams (on, then off within 1.2 s) behind a car in your lane, up to 80 m ahead, and it moves to the slow lane once there's room. Stubborn drivers ignore it; how many depends on personality. | `YieldOnFlash: true`, `FlashWindowMilliseconds: 1200`, `YieldRangeMeters: 80`, `StubbornShare: 0` (extra share) |
 | **Lane sway** | Each driver drifts slightly around the lane centre, at their own rhythm. Distracted drivers drift more. | `SwayMeters: 0.25` |
 | **Brake checks** | Aggressive drivers, and occasionally normal ones, may brake-check a player who tailgates them: under 8 m behind for 2.5 s. It's a short −35 km/h slowdown, not a stop. Plugins can trigger one too. | `TailgateMeters: 8`, `TailgateSeconds: 2.5`, `BrakeCheckCooldownSeconds: 20`, `BrakeCheckDropKph: 35`, `BrakeCheckSeconds: 1.2` |
+| **Spawning** | Traffic doesn't spawn in the first 150 m of a lane that starts from nothing, such as an on-ramp or side road. Those lanes often start off the road, so cars spawned there would come out of the dirt. | `NoSpawnNearLaneStartMeters: 150` |
 | **Density presets** | Fills the hourly traffic density, which AssettoServer blends between hours. Realistic is light at night with rush hours at 7–9 and 16–19; RushHour is busy all day. | `DensityPreset: None` |
 
 ### Crashes
@@ -39,18 +40,18 @@ Every player sees the same crash. Big crashes are simulated by the hitting playe
 
 | Impact speed | What happens |
 |---|---|
-| Under 25 km/h | The car brakes, puts its hazards on, and carries on, like upstream. |
-| 25–50 km/h | It pulls over with hazards: onto the shoulder from the slow lane, otherwise to the slow edge of its lane. It waits 8 s, then rejoins when no player is close behind. |
+| Under 25 km/h | A tap: the car lifts off to 70 % speed with hazards on for 3 s, then carries on. No emergency stop. |
+| 25–50 km/h | It steers aside with hazards on, onto the shoulder from the slow lane or otherwise to the slow edge of its lane, and rolls to a stop rather than braking hard. It waits 8 s, then rejoins when no player is close behind. |
 | 50 km/h and up | The car is pushed, using momentum with traffic at 3000 kg against the player's car. It tumbles under real physics on the hitting player's game; the server's fallback slide spins it, and above 90 km/h can roll it (35 % chance). Parts come off. It then stays as a wreck. It's cleared once no player is within 250 m, or after 90 s. Hitting a wreck knocks it again. |
 
-**Settings:** `CrashPhysics: true`, `TrafficMassKg: 3000`, `PlayerMassKg: 1400`, `MinorCrashKph: 25`, `HeavyCrashKph: 50`, `RolloverKph: 90`, `RolloverChance: 0.35`, `CrashSlideDeceleration: 6`, `PullOverAfterCrash: true`, `PullOverSeconds: 8`, `WreckClearMeters: 250`, `WreckMaxSeconds: 90`, `ClientCrashPhysics: true`.
+**Settings:** `CrashPhysics: true`, `TrafficMassKg: 3000`, `PlayerMassKg: 1400`, `MinorCrashKph: 25`, `HeavyCrashKph: 50`, `RolloverKph: 90`, `RolloverChance: 0.35`, `CrashSlideDeceleration: 6`, `PullOverAfterCrash: true`, `PullOverSeconds: 8`, `PullOverDeceleration: 2.5`, `TapSlowdownSeconds: 3`, `WreckClearMeters: 250`, `WreckMaxSeconds: 90`, `ClientCrashPhysics: true`.
 
 ### Client effects
 
 The server sends players a small script (`bettertraffic.lua`). Settings: `ClientEffects: true`, `ContactWeightFactor: 0.6`.
 - **Sparks** whenever you hit traffic, and sparks plus dust for every crash anyone has, because the server tells everyone.
 - **Damage:** crashed traffic looks damaged and dirty, and wrecks keep smoking until they're cleared.
-- **Loose parts:** bumpers, mirrors, spoilers, lights and other parts come off crashed traffic and bounce around as their own physics bodies, on every player's screen. They go back on when the wreck is cleared. Settings: `LooseParts: true`, `MaxLooseParts: 4`, and `LoosePartNames`, words matched against the traffic car's mesh names.
+- **Loose parts:** bumpers, mirrors, spoilers, lights and other parts come off crashed traffic and fly off, tumble, bounce with sparks and slide to a stop, on every player's screen. The script moves them itself, so they don't depend on CSP physics. If no part names match a traffic model, it uses its mid-sized pieces instead. Big hits also throw glass. They go back on when the wreck is cleared. Settings: `LooseParts: true`, `MaxLooseParts: 6`, and `LoosePartNames`, words matched against the traffic car's mesh names.
 - **Log:** the script writes what it does, and anything that fails, to CSP's Lua debug log with the prefix `BetterTraffic:`.
 - **Weight:** hitting traffic gives your own car an extra push back, as if the traffic car weighed `TrafficMassKg`. `ContactWeightFactor: 0` switches this off.
 

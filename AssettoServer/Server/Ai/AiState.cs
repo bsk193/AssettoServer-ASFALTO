@@ -102,6 +102,7 @@ public class AiState : IDisposable
     private Vector3 _reportPosition;
     private Vector3 _reportVelocity;
     private bool _frozenAtReport;
+    private long _tapUntil;
     private float _pullOverProgress;
     private bool _pullOverRejoining;
     private static int _rightSign; // sign that turns Cross(tangent, Y) into "towards the right-hand lane", 0 = not known yet
@@ -329,8 +330,46 @@ public class AiState : IDisposable
             return false;
         if (!IsKeepingSafetyDistances(in spawnPoint, previousAi, nextAi))
             return false;
+        if (BT.Enabled && BT.NoSpawnNearLaneStartMeters > 0 && DistanceFromLaneStart(spawnPointId) < BT.NoSpawnNearLaneStartMeters)
+            return false;
 
         return EntryCar.CanSpawnAiState(spawnPoint.Position, this);
+    }
+
+    // BetterTraffic: metres from the open start of each lane (on-ramps, side roads), float.MaxValue for looped lanes.
+    // Lanes that start from nothing often start off the road, so cars spawned there come out of the dirt.
+    private static float[]? _distanceFromLaneStart;
+    private static readonly object DistanceFromLaneStartLock = new();
+
+    private float DistanceFromLaneStart(int pointId)
+    {
+        var table = _distanceFromLaneStart;
+        if (table == null)
+        {
+            lock (DistanceFromLaneStartLock)
+            {
+                table = _distanceFromLaneStart;
+                if (table == null)
+                {
+                    var points = _spline.Points;
+                    table = new float[points.Length];
+                    Array.Fill(table, float.MaxValue);
+                    var limit = BT.NoSpawnNearLaneStartMeters * 2;
+                    for (var i = 0; i < points.Length; i++)
+                    {
+                        if (points[i].PreviousId >= 0) continue;
+                        float distance = 0;
+                        for (var id = i; id >= 0 && distance < limit && table[id] > distance; id = points[id].NextId)
+                        {
+                            table[id] = distance;
+                            distance += points[id].Length;
+                        }
+                    }
+                    _distanceFromLaneStart = table;
+                }
+            }
+        }
+        return pointId >= 0 && pointId < table.Length ? table[pointId] : float.MaxValue;
     }
 
     private bool IsKeepingSafetyDistances(in SplinePoint spawnPoint, AiState? previousAi, AiState? nextAi)
@@ -511,7 +550,8 @@ public class AiState : IDisposable
 
         if (_crashMode == AiCrashMode.PullOver && !_pullOverRejoining)
         {
-            SetTargetSpeed(0, EntryCar.AiDeceleration * 0.7f, EntryCar.AiAcceleration);
+            // steer aside first (AdvancePullOver), then roll to a stop: no emergency braking
+            SetTargetSpeed(0, BT.PullOverDeceleration, EntryCar.AiAcceleration);
             if (_sessionManager.ServerTimeMilliseconds > _pullOverUntil && CurrentSpeed == 0 && IsOwnLaneClearBehind(30))
             {
                 _pullOverRejoining = true;
@@ -531,6 +571,12 @@ public class AiState : IDisposable
         if (_sessionManager.ServerTimeMilliseconds < _stoppedForCollisionUntil)
         {
             SetTargetSpeed(0);
+            return;
+        }
+
+        if (_sessionManager.ServerTimeMilliseconds < _tapUntil)
+        {
+            SetTargetSpeed(MathF.Max(WalkingSpeed, InitialMaxSpeed * 0.7f), 2.5f, EntryCar.AiAcceleration);
             return;
         }
 
@@ -639,6 +685,7 @@ public class AiState : IDisposable
         _crashMode = AiCrashMode.None;
         _physicsOwner = 255;
         _frozenAtReport = false;
+        _tapUntil = 0;
         _crashRoll = 0;
         _crashRollTarget = 0;
         _pullOverProgress = 0;
@@ -865,9 +912,15 @@ public class AiState : IDisposable
             return _crashMode;
         }
 
-        if (!bt.CrashPhysics || kph < bt.MinorCrashKph)
+        if (!bt.CrashPhysics)
         {
             StopForCollision();
+            return AiCrashMode.None;
+        }
+        if (kph < bt.MinorCrashKph)
+        {
+            // a tap: lift off, hazards on, carry on (no emergency stop)
+            if (_crashMode == AiCrashMode.None) _tapUntil = _sessionManager.ServerTimeMilliseconds + (long)(bt.TapSlowdownSeconds * 1000);
             return AiCrashMode.None;
         }
 
@@ -1140,7 +1193,7 @@ public class AiState : IDisposable
         }
         else
         {
-            _pullOverProgress = MathF.Min(1, _pullOverProgress + dt / 2.5f);
+            _pullOverProgress = MathF.Min(1, _pullOverProgress + dt / 2.0f);
         }
 
         var slow = SlowSideDirection;
@@ -1462,7 +1515,7 @@ public class AiState : IDisposable
         Status.TyreAngularSpeed[3] = encodedTyreAngularSpeed;
         Status.EngineRpm = (ushort)MathUtils.Lerp(EntryCar.AiIdleEngineRpm, EntryCar.AiMaxEngineRpm, CurrentSpeed / _configuration.Extra.AiParams.MaxSpeedMs);
         Status.StatusFlag = GetLights(_configuration.Extra.AiParams.EnableDaytimeLights, _weatherManager.CurrentSunPosition, _randomTwilight)
-                            | (_sessionManager.ServerTimeMilliseconds < _stoppedForCollisionUntil || CurrentSpeed < 20 / 3.6f || _crashMode != AiCrashMode.None ? CarStatusFlags.HazardsOn : 0)
+                            | (_sessionManager.ServerTimeMilliseconds < _stoppedForCollisionUntil || CurrentSpeed < 20 / 3.6f || _crashMode != AiCrashMode.None || _sessionManager.ServerTimeMilliseconds < _tapUntil ? CarStatusFlags.HazardsOn : 0)
                             | (CurrentSpeed == 0 || Acceleration < 0 ? CarStatusFlags.BrakeLightsOn : 0)
                             | (_stoppedForObstacle && _sessionManager.ServerTimeMilliseconds > _obstacleHonkStart && _sessionManager.ServerTimeMilliseconds < _obstacleHonkEnd ? CarStatusFlags.Horn : 0)
                             | GetWiperSpeed(_weatherManager.CurrentWeather.RainIntensity)
