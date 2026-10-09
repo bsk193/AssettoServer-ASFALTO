@@ -89,6 +89,8 @@ public class BetterTrafficParams
     public float PullOverDeceleration { get; set; } = 2.5f;
     [YamlMember(Description = "How far a car in the slow lane moves towards the road edge when it pulls over (m from the lane centre). Keep it small on roads without a hard shoulder")]
     public float PullOverShoulderMeters { get; set; } = 1.4f;
+    [YamlMember(Description = "Players don't see a traffic car glide or jump into place when it spawns or respawns: it stays hidden until it drives normally (client script)")]
+    public bool HideSpawnJumps { get; set; } = true;
     [YamlMember(Description = "From this impact speed (km/h) traffic is pushed, slides and spins, and stays as a wreck; below it, it pulls over")]
     public float HeavyCrashKph { get; set; } = 50;
     [YamlMember(Description = "Above this impact speed (km/h) traffic can roll over, with RolloverChance")]

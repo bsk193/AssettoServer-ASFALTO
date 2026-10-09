@@ -58,6 +58,7 @@ public class BetterTrafficCrashes
                     ["PARTS"] = bt.LooseParts ? 1 : 0,
                     ["PART_NAMES"] = string.Join("|", bt.LoosePartNames),
                     ["MAX_PARTS"] = bt.MaxLooseParts,
+                    ["HIDE_JUMPS"] = bt.HideSpawnJumps ? 1 : 0,
                 });
         }
     }

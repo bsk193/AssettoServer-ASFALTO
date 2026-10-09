@@ -766,7 +766,9 @@ public class AiState : IDisposable
     {
         if (pointId < 0) return -1;
         ref readonly var point = ref _spline.Points[pointId];
-        return direction < 0 ? point.LeftId : point.RightId;
+        var adjacent = direction < 0 ? point.LeftId : point.RightId;
+        // lane detection also links the oncoming lane of a two-way road: never change lanes into it
+        return adjacent >= 0 && _spline.Operations.IsSameDirection(pointId, adjacent) ? adjacent : -1;
     }
 
     /// <summary>

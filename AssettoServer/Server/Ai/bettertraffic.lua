@@ -7,7 +7,7 @@
 
 local cfg = ac.configValues({
   AI_SLOTS = '', TRAFFIC_MASS = 3000, CONTACT_WEIGHT = 0.6, CLIENT_PHYSICS = 1, HEAVY_KPH = 50,
-  PARTS = 1, PART_NAMES = 'bumper|mirror|spoiler', MAX_PARTS = 6,
+  PARTS = 1, PART_NAMES = 'bumper|mirror|spoiler', MAX_PARTS = 6, HIDE_JUMPS = 1,
 })
 
 local function log(message) ac.log('BetterTraffic: ' .. message) end
@@ -19,6 +19,8 @@ local heavyKph = num(cfg.HEAVY_KPH, 50)
 local clientPhysics = num(cfg.CLIENT_PHYSICS, 1) ~= 0
 local partsEnabled = num(cfg.PARTS, 1) ~= 0
 local maxParts = num(cfg.MAX_PARTS, 6)
+local hideJumps = num(cfg.HIDE_JUMPS, 1) ~= 0
+local sim = ac.getSim()
 
 local isTraffic = {}
 for id in string.gmatch(tostring(cfg.AI_SLOTS), '%d+') do isTraffic[tonumber(id)] = true end
@@ -450,9 +452,53 @@ end)
 
 -- ── every frame ────────────────────────────────────────────────────────────────────────────────────────────────
 
+-- ── spawn jumps ─────────────────────────────────────────────────────────────────────────────────────────────────
+-- A traffic slot shows the AI state closest to you; when it respawns or switches state, its position jumps (and the
+-- game may glide it there from the old spot, e.g. out of the dirt). Such a car moves much faster than its own speed:
+-- hide it until it has driven normally for a moment.
+
+local jumps = {} -- car index -> { last = vec3, hidden = bool, calm = seconds }
+
+local function updateJumps(dt)
+  if not hideJumps or dt <= 0 then return end
+  for i = 1, sim.carsCount - 1 do
+    if isTraffic[i] and not sims[i] then
+      local car = ac.getCar(i)
+      if car then
+        local j = jumps[i]
+        if not j then
+          j = { last = car.position:clone(), hidden = false, calm = 0 }
+          jumps[i] = j
+        else
+          local moved = car.position:distance(j.last)
+          j.last:set(car.position)
+          local jumping = moved > 6 + car.velocity:length() * dt * 2
+          if jumping then
+            j.calm = 0
+            if not j.hidden then
+              j.hidden = true
+              ac.setCarActive(i, false)
+            end
+          elseif j.hidden then
+            j.calm = j.calm + dt
+            if j.calm > 0.4 then
+              j.hidden = false
+              ac.setCarActive(i, true)
+            end
+          end
+        end
+      end
+    elseif jumps[i] and jumps[i].hidden then
+      jumps[i].hidden = false
+      ac.setCarActive(i, true)
+    end
+  end
+end
+
 function script.update(dt)
   clock = clock + dt
   updateSims(dt)
+  updateJumps(dt)
   for index, d in pairs(damaged) do
     local car = ac.getCar(index)
     -- Is this car slot still showing the crashed car? After the wreck is cleared (or with traffic overbooking) the same
