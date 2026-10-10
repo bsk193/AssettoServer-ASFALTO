@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -114,7 +114,9 @@ public class FastLaneParser
             throw new InvalidOperationException($"No AI splines found. Please put at least one AI spline fast_lane.ai(p) into {Path.GetFullPath(folder)}");
         }
 
-        return new MutableAiSpline(splines, _configuration.Extra.AiParams.LaneWidthMeters, _configuration.Extra.AiParams.TwoWayTraffic, configuration, _logger);
+        var btParams = _configuration.Extra.AiParams.BetterTraffic;
+        return new MutableAiSpline(splines, _configuration.Extra.AiParams.LaneWidthMeters, _configuration.Extra.AiParams.TwoWayTraffic, configuration, _logger,
+            btParams.Enabled ? btParams.SmoothLaneJoinMeters : 0);
     }
 
     private SplinePoint[] FromFileV7(BinaryReader reader, int idOffset)
@@ -239,7 +241,24 @@ public class FastLaneParser
             }
         }
 
-        bool closedLoop = Vector3.Distance(points[0].Position, points[^1].Position) < 50;
+        var loopGap = Vector3.Distance(points[0].Position, points[^1].Position);
+        bool closedLoop = loopGap < 50;
+        var bt = _configuration.Extra.AiParams.BetterTraffic;
+        if (closedLoop && bt.Enabled && points.Length > 2 && loopGap > 0.5f)
+        {
+            // BetterTraffic: a lane that only ends near its start is not a loop. Closing it makes traffic drive straight
+            // across to the start (over the dirt, then merging into the road). A real loop ends close to its start,
+            // heading towards it.
+            var endDirection = (points[^1].Position - points[^2].Position) with { Y = 0 };
+            var gapDirection = (points[0].Position - points[^1].Position) with { Y = 0 };
+            var aligned = endDirection.LengthSquared() > 1e-4f && gapDirection.LengthSquared() > 1e-4f
+                          && Vector3.Dot(Vector3.Normalize(endDirection), Vector3.Normalize(gapDirection)) > 0.7f;
+            if (loopGap > bt.LoopCloseMaxMeters || !aligned)
+            {
+                closedLoop = false;
+                _logger.Information("BetterTraffic: lane {Name} ends {Gap:F0} m from its start, not closing it into a loop", name, loopGap);
+            }
+        }
         if (!closedLoop)
         {
             points[0].PreviousId = -1;

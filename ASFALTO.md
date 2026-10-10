@@ -33,7 +33,10 @@ Every setting below sits under `AiParams.BetterTraffic`, with the defaults shown
 | **Brake checks** | Aggressive drivers, and occasionally normal ones, may brake-check a player who tailgates them: under 8 m behind for 2.5 s. It's a short −35 km/h slowdown, not a stop. Plugins can trigger one too. | `TailgateMeters: 8`, `TailgateSeconds: 2.5`, `BrakeCheckCooldownSeconds: 20`, `BrakeCheckDropKph: 35`, `BrakeCheckSeconds: 1.2` |
 | **Spawning** | Traffic doesn't spawn in the first 150 m of a lane that starts from nothing, such as an on-ramp or side road. Those lanes often start off the road, so cars spawned there would come out of the dirt. | `NoSpawnNearLaneStartMeters: 150` |
 | **Side roads** | No spawning on side roads either: open lanes shorter than 1 km that mostly have no neighbouring lane, such as connectors, service roads and ramps through the dirt. Traffic still turns onto them from the main road. The server log shows how many lane starts and side roads it found. | `NoSpawnOnSideRoads: true`, `SideRoadMaxMeters: 1000` |
-| **Spawn jumps** | A traffic car that respawns, or switches to another traffic car, jumps to its new place; the game may also glide it there from the old spot. Players don't see that: the car stays hidden until it drives normally (about half a second). | `HideSpawnJumps: true` |
+| **Spawn jumps** | A traffic car that respawns, or switches to another traffic car, jumps to its new place; the game may also glide it there from the old spot. Players don't see that: the car stays hidden until it drives normally (about half a second). That includes short glides: a car moving sideways, or much faster or backwards compared to its own speed, for a few frames. | `HideSpawnJumps: true` |
+| **Spline loops** | AssettoServer closes a spline lane into a loop when its end is within 50 m of its start. Some lanes just end near where they start, so traffic drove straight across the dirt back to the start and merged into the road. BetterTraffic only closes a loop when the end is close to the start and heading towards it. Other lanes stay open: traffic that reaches the end despawns. The server log lists the lanes it left open. | `LoopCloseMaxMeters: 8` |
+| **Lane joins** | Where the map joins a lane (its end, or a junction) onto another lane with a sideways step, traffic was shifted sideways in one go. The join now moves up to 25 m further along the target lane, so traffic merges gently. The server log lists each join it moved. The AI cache gets a new name, because the spline is built differently. | `SmoothLaneJoinMeters: 25` |
+| **Sticky traffic** | A traffic slot holds several cars and shows each player the closest one. Near a tie the server could keep switching between them, so the car on your screen glided sideways or turned into a car going the other way. A player now keeps seeing the car they already see unless another is clearly closer. | `StickyAiStates: true` |
 | **Density presets** | Fills the hourly traffic density, which AssettoServer blends between hours. Realistic is light at night with rush hours at 7–9 and 16–19; RushHour is busy all day. | `DensityPreset: None` |
 
 ### Crashes
@@ -101,3 +104,8 @@ The client script was checked against a stub of CSP's Lua API.
 ### Not done
 
 - **Damaged models:** damaged ("Copart") skins need damaged art for each traffic model, so the client darkens and dents the existing model instead.
+
+
+## AutoModerationPlugin
+
+The build also ships `AutoModerationPlugin.dll`; the install script puts it in `plugins/AutoModerationPlugin/` (backup: `AutoModerationPlugin.dll.upstream`). The plugin is unchanged except for its warning icons: wrong way, no lights, and no stopping on the road. Before an icon has loaded, or if it can't be loaded at all, the game drew a grey square. It now draws a red warning badge with the text instead.

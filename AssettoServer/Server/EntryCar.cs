@@ -1,4 +1,4 @@
-﻿using AssettoServer.Network.Tcp;
+using AssettoServer.Network.Tcp;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -241,6 +241,19 @@ public partial class EntryCar : IEntryCar<ACTcpClient>
         if (AiControlled)
         {
             var aiState = GetBestStateForPlayer(targetCarStatus);
+
+            // BetterTraffic: keep showing the car this player already sees unless another one is clearly closer.
+            // Every switch makes the car jump to the other state's place, and the game glides it there: sideways
+            // over the dirt, or turning into a car going the other way.
+            var lastState = LastSeenAiState[toCar.SessionId];
+            var bt = _configuration.Extra.AiParams.BetterTraffic;
+            if (bt.Enabled && bt.StickyAiStates && aiState != null && lastState != null && lastState != aiState
+                && lastState.Initialized && lastState.SpawnCounter == LastSeenAiSpawn[toCar.SessionId])
+            {
+                var lastDistance = Vector3.DistanceSquared(lastState.Status.Position, targetCarStatus.Position);
+                var bestDistance = Vector3.DistanceSquared(aiState.Status.Position, targetCarStatus.Position);
+                if (bestDistance > lastDistance * 0.5f) aiState = lastState;
+            }
 
             if (aiState == null)
             {

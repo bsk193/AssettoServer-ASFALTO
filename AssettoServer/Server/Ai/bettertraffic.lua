@@ -470,9 +470,19 @@ local function updateJumps(dt)
           j = { last = car.position:clone(), hidden = false, calm = 0 }
           jumps[i] = j
         else
-          local moved = car.position:distance(j.last)
+          -- what the car did this frame vs what a driving car can do: jumps, and glides that are sideways
+          -- (from the side of the road) or along the road far faster / backwards compared to its own speed
+          local delta = car.position - j.last
           j.last:set(car.position)
-          local jumping = moved > 6 + car.velocity:length() * dt * 2
+          local moved = delta:length()
+          local look = car.look
+          local along = (delta.x * look.x + delta.z * look.z) / dt
+          local sideways = math.sqrt(math.max(0, delta.x * delta.x + delta.z * delta.z - (along * dt) ^ 2)) / dt
+          local forwardSpeed = car.velocity.x * look.x + car.velocity.z * look.z
+          local glide = moved > 0.4 and (sideways > 9 or math.abs(along - forwardSpeed) > 18)
+            and not (damaged[i] and clock - (damaged[i].hitAt or 0) < 20) -- a crash slide is real movement
+          j.glide = glide and (j.glide or 0) + 1 or 0
+          local jumping = moved > 6 + car.velocity:length() * dt * 2 or j.glide >= 3 -- a glide lasts, a hiccup doesn't
           if jumping then
             j.calm = 0
             if not j.hidden then

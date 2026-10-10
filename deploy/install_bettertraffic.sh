@@ -25,6 +25,15 @@ cp AssettoServer.asfalto AssettoServer
 chmod +x AssettoServer
 echo "Installed the ASFALTO AssettoServer build"
 
+# AutoModerationPlugin: same plugin, its warning icons no longer show as grey squares
+if [ -f AutoModerationPlugin.dll.asfalto ] && [ -d plugins/AutoModerationPlugin ]; then
+  if [ -f plugins/AutoModerationPlugin/AutoModerationPlugin.dll ] && [ ! -f plugins/AutoModerationPlugin/AutoModerationPlugin.dll.upstream ]; then
+    cp plugins/AutoModerationPlugin/AutoModerationPlugin.dll plugins/AutoModerationPlugin/AutoModerationPlugin.dll.upstream
+  fi
+  cp AutoModerationPlugin.dll.asfalto plugins/AutoModerationPlugin/AutoModerationPlugin.dll
+  echo "Installed the ASFALTO AutoModerationPlugin (backup: plugins/AutoModerationPlugin/AutoModerationPlugin.dll.upstream)"
+fi
+
 cfg=cfg/extra_cfg.yml
 if grep -q '^  Traffic2:' "$cfg"; then
   # build 1 called it Traffic2; AssettoServer refuses unknown settings, so rename it

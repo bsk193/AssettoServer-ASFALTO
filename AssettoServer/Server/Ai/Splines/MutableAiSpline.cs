@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -19,8 +19,47 @@ public class MutableAiSpline
 
     private readonly ILogger _logger;
 
-    internal MutableAiSpline(Dictionary<string, FastLane> splines, float laneWidth, bool twoWayTraffic = false, TrafficConfiguration? configuration = null, ILogger? logger = null)
+    private readonly float smoothJoinMeters;
+
+    /// <summary>
+    /// BetterTraffic: the point on the target lane to join, starting at the map's join point and going further along
+    /// it (up to <paramref name="maxMeters"/>) until the step from the lane's last point is mostly forwards, not sideways.
+    /// </summary>
+    private int SmoothJoin(int fromId, int target, float maxMeters)
     {
+        var last = Points[fromId].Position;
+        var previousId = Points[fromId].PreviousId;
+        if (previousId < 0) return target;
+        var beforeLast = Points[previousId].Position;
+        var direction = (last - beforeLast) with { Y = 0 };
+        if (direction.LengthSquared() < 1e-6f) return target;
+        direction = Vector3.Normalize(direction);
+
+        static float Sideways(Vector3 step, Vector3 dir, out float along)
+        {
+            step = step with { Y = 0 };
+            along = Vector3.Dot(step, dir);
+            return (step - dir * along).Length();
+        }
+
+        var sideways = Sideways(Points[target].Position - last, direction, out var forward);
+        if (sideways <= 1 && forward > 0) return target; // already a clean join
+        float travelled = 0;
+        for (var id = target; id >= 0 && travelled <= maxMeters; id = Points[id].NextId)
+        {
+            sideways = Sideways(Points[id].Position - last, direction, out forward);
+            // a point can only be the end of one junction: skip points other joins already use
+            var free = id == target || (Points[id].JunctionEndId < 0 && Points[id].JunctionStartId < 0);
+            if (free && forward > 0 && sideways <= forward * 0.25f) return id;
+            travelled += Points[id].Length;
+            if (Points[id].NextId == target) break; // looped
+        }
+        return target;
+    }
+
+    internal MutableAiSpline(Dictionary<string, FastLane> splines, float laneWidth, bool twoWayTraffic = false, TrafficConfiguration? configuration = null, ILogger? logger = null, float smoothJoinMeters = 0)
+    {
+        this.smoothJoinMeters = smoothJoinMeters;
         _logger = logger ?? Log.Logger;
         Splines = splines;
 
@@ -108,6 +147,16 @@ public class MutableAiSpline
             {
                 ref var endPoint = ref GetByIdentifier(spline.ConnectEnd);
                 ref var startPoint = ref Points[startSpline.Points[^1].Id];
+                if (smoothJoinMeters > 0)
+                {
+                    var better = SmoothJoin(startPoint.Id, endPoint.Id, smoothJoinMeters);
+                    if (better != endPoint.Id)
+                    {
+                        _logger.Information("BetterTraffic: lane {Name} joins {Target} {Meters:F0} m further along (sideways step at the join)",
+                            spline.Name, spline.ConnectEnd, Vector3.Distance(Points[better].Position, endPoint.Position));
+                        endPoint = ref Points[better];
+                    }
+                }
                 
                 startPoint.NextId = endPoint.Id;
                 
@@ -134,6 +183,16 @@ public class MutableAiSpline
 
                 ref var startPoint = ref Points[startSpline.Points[junction.Start].Id];
                 ref var endPoint = ref GetByIdentifier(junction.End);
+                if (smoothJoinMeters > 0)
+                {
+                    var better = SmoothJoin(startPoint.Id, endPoint.Id, smoothJoinMeters);
+                    if (better != endPoint.Id)
+                    {
+                        _logger.Information("BetterTraffic: junction {Name} joins {Target} {Meters:F0} m further along (sideways step at the join)",
+                            junction.Name, junction.End, Vector3.Distance(Points[better].Position, endPoint.Position));
+                        endPoint = ref Points[better];
+                    }
+                }
 
                 var jct = new SplineJunction
                 {

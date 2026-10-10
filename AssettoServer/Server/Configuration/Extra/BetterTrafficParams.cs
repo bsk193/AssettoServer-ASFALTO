@@ -91,6 +91,12 @@ public class BetterTrafficParams
     public float PullOverShoulderMeters { get; set; } = 1.4f;
     [YamlMember(Description = "Players don't see a traffic car glide or jump into place when it spawns or respawns: it stays hidden until it drives normally (client script)")]
     public bool HideSpawnJumps { get; set; } = true;
+    [YamlMember(Description = "A traffic slot shows each player its closest car; keep showing the one a player already sees unless another is clearly closer (fewer cars gliding across the road or flipping direction)")]
+    public bool StickyAiStates { get; set; } = true;
+    [YamlMember(Description = "A spline lane whose end is within this distance of its start (and heads towards it) is a loop; further = an open lane. Upstream closes anything within 50 m, so traffic cut across to the start")]
+    public float LoopCloseMaxMeters { get; set; } = 8;
+    [YamlMember(Description = "Where the map joins a lane's end onto another lane with a sideways step, join it further along that lane so traffic merges gently (max this many metres further). 0 = as the map says")]
+    public float SmoothLaneJoinMeters { get; set; } = 25;
     [YamlMember(Description = "From this impact speed (km/h) traffic is pushed, slides and spins, and stays as a wreck; below it, it pulls over")]
     public float HeavyCrashKph { get; set; } = 50;
     [YamlMember(Description = "Above this impact speed (km/h) traffic can roll over, with RolloverChance")]

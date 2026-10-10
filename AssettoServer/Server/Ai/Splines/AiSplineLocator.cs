@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.IO.Hashing;
 using System.Linq;
@@ -56,7 +56,9 @@ public class AiSplineLocator
             mapAiBasePath = mapAiLayoutPath;
         }
         
-        var cacheKey = GenerateCacheKey(mapAiBasePath);
+        var bt = _configuration.Extra.AiParams.BetterTraffic;
+        var cacheKey = GenerateCacheKey(mapAiBasePath,
+            bt.Enabled ? FormattableString.Invariant($"asfalto-spline-3|{bt.LoopCloseMaxMeters}|{bt.SmoothLaneJoinMeters}") : "");
         Directory.CreateDirectory("cache");
         var cachePath = Path.Join("cache", $"{cacheKey}.aic{AiSpline.SupportedVersion}");
         if (!File.Exists(cachePath))
@@ -70,9 +72,11 @@ public class AiSplineLocator
         return new AiSpline(cachePath);
     }
 
-    private static string GenerateCacheKey(string folder)
+    private static string GenerateCacheKey(string folder, string salt)
     {
         var hash = new XxHash64();
+        // ASFALTO: BetterTraffic builds the spline differently (loops, lane joins, by its settings): its own cache
+        if (salt.Length > 0) hash.Append(System.Text.Encoding.UTF8.GetBytes(salt));
         
         string aipPath = Path.Join(folder, "fast_lane.aip");
         if (File.Exists(aipPath))
